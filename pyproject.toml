@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lisa_packs*", "lisa_packs.okf*"]
+
+[tool.setuptools.package-data]
+"lisa_packs.okf" = ["modes/**/*.md", "operations/**/*.md", "operations/**/*.yml", "content/**/*.md"]
+
+[project]
+name = "lisa-pack-okf"
+version = "0.1.0"
+description = "Lisa OKF pack - Open Knowledge Format ingestion, validation, emission, and visualization"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.14.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["lisa_packs/okf/tests"]
+
+[project.entry-points."lisa.extensions.content_roots"]
+okf = "lisa_packs.okf:get_content_root"
