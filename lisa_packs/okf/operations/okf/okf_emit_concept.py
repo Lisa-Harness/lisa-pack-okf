@@ -1,19 +1,20 @@
 """OKF emit concept operation — write a single OKF v0.2 concept document.
 
 No-LLM deterministic write: takes concept metadata and body text, produces
-a conformant OKF markdown file with YAML frontmatter. Creates parent
-directories as needed.
+a conformant OKF markdown file with YAML frontmatter. Writes through the
+``lisa-storage`` MCP server's ``write_file`` tool — never touches the
+filesystem directly.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from kernel.models import OperationExecutionContext, OperationResult
-from lisa_packs.okf.utils.okf_helpers import format_okf_frontmatter, write_concept_file
+from kernel.models import OperationExecutionContext, OperationResult, ToolExecutionContext
+from lisa_packs.okf.utils.okf_helpers import format_okf_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class Parameters(BaseModel):
 
     bundle_path: str = Field(
         ...,
-        description="Absolute path to the OKF bundle directory to write into.",
+        description="Relative path within the lisa-storage files sandbox for the OKF bundle directory (e.g. 'okf/my-bundle').",
     )
     concept_path: str = Field(
         ...,
@@ -49,6 +50,18 @@ class Parameters(BaseModel):
         default="stable",
         description="Lifecycle status: draft, stable, or deprecated.",
     )
+    generated_by: str = Field(
+        default="",
+        description="Actor who produced the content (e.g. 'human:adam'). Defaults to lisa-pack-okf/0.1.0.",
+    )
+    resource: str = Field(
+        default="",
+        description="Canonical URI for the underlying asset, written into frontmatter.",
+    )
+    stale_after: str = Field(
+        default="",
+        description="YYYY-MM-DD date after which the concept is considered stale.",
+    )
     body: str = Field(
         default="",
         description="Markdown body content for the concept document.",
@@ -71,6 +84,9 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         tags = []
 
     status_str = str(ctx.params.get("status", "stable")).strip() or "stable"
+    generated_by_str = str(ctx.params.get("generated_by", "")).strip() or "lisa-pack-okf/0.1.0"
+    resource_str = str(ctx.params.get("resource", "")).strip()
+    stale_after_str = str(ctx.params.get("stale_after", "")).strip()
 
     if not bundle_path_str:
         return OperationResult(output_text="OKF emit failed: bundle_path is required.")
@@ -80,13 +96,24 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         return OperationResult(output_text="OKF emit failed: type is required (OKF v0.2 §4.1).")
 
     # Validate concept_path doesn't use reserved filenames
-    filename = Path(concept_path_str).name
+    filename = concept_path_str.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     if filename in ("index.md", "log.md"):
         return OperationResult(
             output_text=f"OKF emit failed: '{filename}' is a reserved filename (OKF v0.2 §3.1).",
         )
 
-    bundle = Path(bundle_path_str)
+    # Reject absolute paths and parent traversal — the storage server
+    # re-validates, but we fail early with a clearer error.
+    for part in (bundle_path_str + "/" + concept_path_str).replace("\\", "/").split("/"):
+        if part == "..":
+            return OperationResult(
+                output_text="OKF emit failed: paths may not contain '..' segments.",
+            )
+
+    if not callable(ctx.execute_tool_fn):
+        return OperationResult(
+            output_text="OKF emit failed: tool execution not injected (lisa-storage write_file unavailable).",
+        )
 
     frontmatter = format_okf_frontmatter(
         concept_type=type_str,
@@ -94,19 +121,43 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         description=description_str,
         tags=tags if tags else None,
         status=status_str,
+        generated_by=generated_by_str,
+        resource=resource_str,
+        stale_after=stale_after_str,
     )
 
-    try:
-        concept_file = write_concept_file(bundle, concept_path_str, frontmatter, body_str)
-    except OSError as exc:
+    content = frontmatter
+    if body_str:
+        content += f"\n{body_str}\n"
+
+    # Combine bundle_path + concept_path into a single sandbox-relative path.
+    full_path = f"{bundle_path_str}/{concept_path_str}"
+    if not full_path.endswith(".md"):
+        full_path += ".md"
+
+    tool_result = await ctx.execute_tool_fn(
+        "write_file",
+        ToolExecutionContext(
+            tool_id="write_file",
+            workspace_id=ctx.workspace_id,
+            user_id=ctx.user_id,
+            user_slug=ctx.user_slug,
+            surface_id=ctx.surface_id,
+            memory_scope=ctx.memory_scope,
+            mode_id=ctx.mode_id,
+            parameters={"path": full_path, "content": content},
+        ),
+    )
+
+    result_data = json.loads(tool_result.output_text or "{}")
+    if not result_data.get("ok"):
         return OperationResult(
-            output_text=f"OKF emit failed: could not write {concept_path_str}: {exc}",
+            output_text=f"OKF emit failed: storage write_file error: {result_data.get('error', 'unknown')}",
         )
 
-    rel_path = str(concept_file.relative_to(bundle)).replace("\\", "/")
     return OperationResult(
         output_text=(
-            f"OKF concept emitted: {rel_path}\n"
+            f"OKF concept emitted: {full_path}\n"
             f"  type: {type_str}\n"
             f"  title: {title_str or '(untitled)'}\n"
             f"  bundle: {bundle_path_str}"

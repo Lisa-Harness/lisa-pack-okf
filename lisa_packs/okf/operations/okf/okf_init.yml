@@ -1,0 +1,9 @@
+type: Lisa Operation
+title: OKF Init
+description: Scaffold a conformant OKF v0.2 bundle directory with index.md and log.md stubs. The first-run experience for a new bundle — analogous to `git init` for knowledge bundles. Creates the directory if it doesn't exist and refuses to clobber a non-empty directory unless force=True is passed.
+tags: [okf, init, scaffold, bundle]
+status: stable
+generated: { by: human:adam, at: 2026-07-28T00:00:00Z }
+operation_id: okf_init
+exportable: true
+default_available: true

@@ -19,14 +19,17 @@ routing_intent_keywords:
     - okf
     - open knowledge format
     - knowledge bundle
+    - init okf bundle
     - validate okf
     - ingest okf
     - emit okf
+    - reindex okf
+    - log okf
     - export memory
     - okf concept
-allowed_operation_ids: [okf_validate, okf_ingest, okf_emit_concept, okf_export_memory]
+allowed_operation_ids: [okf_init, okf_validate, okf_ingest, okf_emit_concept, okf_export_memory, okf_reindex, okf_log]
 allowed_tool_ids: [memory.list]
-description: "OKF workflow mode for validating, ingesting, emitting, and exporting Open Knowledge Format bundles."
+description: "OKF workflow mode for initializing, validating, ingesting, emitting, reindexing, logging, and exporting Open Knowledge Format bundles."
 command_pattern: '^(?:(?:/)?(?:okf)(?:[\s,:;]+|(?=$)))(?P<query>.*)$'
 ---
 # OKF Mode
@@ -37,9 +40,17 @@ human-and-agent-friendly format.
 
 ## Available operations
 
-- `okf_validate` — check a directory for OKF v0.2 conformance
-- `okf_ingest` — read an OKF bundle and return its concepts as structured data
-- `okf_emit_concept` — write a single OKF concept document to a bundle directory
+Bundle lifecycle:
+
+- `okf_init` — scaffold a conformant bundle directory with `index.md` + `log.md` stubs
+- `okf_reindex` — regenerate `index.md` from the bundle's current concepts
+- `okf_log` — append a structured, timestamped entry to `log.md`
+
+Concept I/O:
+
+- `okf_validate` — check a directory for OKF v0.2 conformance (strict mode checks `status`, `stale_after`, `generated.at`, `sources[].resource`)
+- `okf_ingest` — read an OKF bundle and return its concepts as structured data (full body when `truncate_body=False`)
+- `okf_emit_concept` — write a single OKF concept document with full provenance (`generated_by`, `resource`, `stale_after`, `sources`)
 - `okf_export_memory` — export memory records to an OKF bundle (calls `memory.list`)
 
 ## OKF v0.2 quick reference
@@ -59,4 +70,4 @@ Trust and provenance fields (all optional):
 - `stale_after: YYYY-MM-DD`
 - `sources: [{ id, resource, title, ... }]`
 
-Reserved filenames: `index.md` (directory listing), `log.md` (update history).
+Reserved filenames: `index.md` (directory listing), `log.md` (update history). `okf_init` scaffolds both; `okf_reindex` regenerates `index.md`; `okf_log` appends to `log.md`.

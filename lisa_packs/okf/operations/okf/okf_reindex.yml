@@ -1,0 +1,9 @@
+type: Lisa Operation
+title: OKF Reindex
+description: Regenerate a bundle's index.md from its current concepts. Walks the bundle, parses frontmatter from every non-reserved .md file, and rewrites index.md with a current table of contents. Appends an entry to log.md. Preserves the existing index title unless an override is passed.
+tags: [okf, index, maintenance, bundle]
+status: stable
+generated: { by: human:adam, at: 2026-07-28T00:00:00Z }
+operation_id: okf_reindex
+exportable: true
+default_available: true

@@ -26,6 +26,13 @@ class Parameters(BaseModel):
         ...,
         description="Absolute path to the OKF bundle directory to ingest.",
     )
+    truncate_body: bool = Field(
+        default=True,
+        description=(
+            "If True (default), truncate each concept body to 2000 chars in the "
+            "structured output. Set False to receive the full body text."
+        ),
+    )
 
 
 class OkfConcept(BaseModel):
@@ -159,8 +166,15 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
             full_text = ""
 
         body = _extract_body(full_text)
-        # Truncate body for structured output — full body is available on disk
-        body_preview = body[:2000]
+        # Truncation is opt-in via the ``truncate_body`` parameter so that
+        # callers who want the full text (e.g. a backend reading concepts)
+        # get it. Default remains 2000 for backwards compatibility with
+        # chat-mode summaries where token budget matters.
+        truncate = ctx.params.get("truncate_body", True)
+        if truncate:
+            body_preview = body[:2000]
+        else:
+            body_preview = body
 
         generated_by, generated_at = _generated_info(frontmatter)
 
