@@ -28,6 +28,7 @@ routing_intent_keywords:
     - export memory
     - okf concept
 allowed_operation_ids: [okf_init, okf_validate, okf_ingest, okf_emit_concept, okf_export_memory, okf_reindex, okf_log]
+required_capabilities: [tools]
 allowed_tool_ids: [memory.list, lisa-storage.write_file, lisa-storage.read_file, lisa-storage.list_files, lisa-storage.make_dir]
 description: "OKF workflow mode for initializing, validating, ingesting, emitting, reindexing, logging, and exporting Open Knowledge Format bundles."
 command_pattern: '^(?:(?:/)?(?:okf)(?:[\s,:;]+|(?=$)))(?P<query>.*)$'

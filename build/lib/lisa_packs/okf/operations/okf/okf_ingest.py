@@ -1,22 +1,27 @@
 """OKF ingest operation — read an OKF v0.2 bundle and return its concepts.
 
-No-LLM deterministic read: walks a directory tree, parses YAML frontmatter
-from every non-reserved .md file, and returns structured concept documents.
+No-LLM deterministic read: walks the bundle via ``lisa-storage``
+(``list_files`` + ``read_file``), parses YAML frontmatter from every
+non-reserved ``.md`` file, and returns structured concept documents.
+Every read goes through ``lisa-storage``; ``bundle_path`` is a
+sandbox-relative path under ``data_dir/files`` (e.g. ``okf/my-bundle``).
 """
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
-import yaml
 from pydantic import BaseModel, Field
 
 from kernel.models import OperationExecutionContext, OperationResult
+from lisa_packs.okf.utils.okf_helpers import (
+    RESERVED_FILENAMES,
+    list_bundle_files,
+    parse_frontmatter,
+    read_bundle_file,
+)
 
 logger = logging.getLogger(__name__)
-
-_RESERVED_FILENAMES = frozenset({"index.md", "log.md"})
 
 
 class Parameters(BaseModel):
@@ -24,7 +29,14 @@ class Parameters(BaseModel):
 
     bundle_path: str = Field(
         ...,
-        description="Absolute path to the OKF bundle directory to ingest.",
+        description="Relative path within the lisa-storage files sandbox for the OKF bundle directory to ingest.",
+    )
+    truncate_body: bool = Field(
+        default=True,
+        description=(
+            "If True (default), truncate each concept body to 2000 chars in the "
+            "structured output. Set False to receive the full body text."
+        ),
     )
 
 
@@ -44,39 +56,10 @@ class OkfConcept(BaseModel):
 
 
 class OkfBundle(BaseModel):
-    """A complete OKF bundle ingested from disk."""
+    """A complete OKF bundle ingested from the storage sandbox."""
 
     bundle_path: str = Field(..., description="The bundle directory path.")
     concepts: list[OkfConcept] = Field(default_factory=list, description="All concept documents in the bundle.")
-
-
-def _parse_frontmatter(file_path: Path) -> dict[str, object] | None:
-    """Parse YAML frontmatter from a markdown file."""
-    try:
-        text = file_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-    if not text.startswith("---"):
-        return None
-
-    end_idx = text.find("---", 3)
-    if end_idx == -1:
-        return None
-
-    frontmatter_text = text[3:end_idx].strip()
-    if not frontmatter_text:
-        return None
-
-    try:
-        parsed = yaml.safe_load(frontmatter_text)
-    except yaml.YAMLError:
-        return None
-
-    if not isinstance(parsed, dict):
-        return None
-
-    return parsed
 
 
 def _extract_body(text: str) -> str:
@@ -123,29 +106,49 @@ def _generated_info(data: dict[str, object]) -> tuple[str, str]:
     return by, at
 
 
+def _strip_bundle_prefix(sandbox_path: str, bundle_path_str: str) -> str:
+    """Strip the bundle's sandbox prefix to get the in-bundle relative path."""
+    p = sandbox_path.replace("\\", "/")
+    prefix = bundle_path_str.replace("\\", "/").strip("/")
+    if prefix and p.startswith(prefix + "/"):
+        return p[len(prefix) + 1:]
+    return p
+
+
 async def execute(ctx: OperationExecutionContext) -> OperationResult:
     """Ingest an OKF v0.2 bundle and return its concepts as structured data."""
-    bundle_path_str = str(ctx.params.get("bundle_path", "")).strip()
+    bundle_path_str = str(ctx.params.get("bundle_path", "")).strip().strip("/")
     if not bundle_path_str:
         return OperationResult(
             output_text="OKF ingest failed: bundle_path is required.",
         )
 
-    bundle = Path(bundle_path_str)
-    if not bundle.is_dir():
+    if ".." in bundle_path_str.replace("\\", "/").split("/"):
         return OperationResult(
-            output_text=f"OKF ingest failed: path is not a directory: {bundle_path_str}",
+            output_text="OKF ingest failed: bundle_path may not contain '..' segments.",
         )
+
+    if not callable(ctx.execute_tool_fn):
+        return OperationResult(
+            output_text="OKF ingest failed: tool execution not injected (lisa-storage unavailable).",
+        )
+
+    files = await list_bundle_files(ctx, bundle_path_str)
 
     concepts: list[OkfConcept] = []
 
-    for md_file in sorted(bundle.rglob("*.md")):
-        if md_file.name in _RESERVED_FILENAMES:
+    for sandbox_path in files:
+        rel_path = _strip_bundle_prefix(sandbox_path, bundle_path_str)
+        if not rel_path.endswith(".md"):
+            continue
+        if rel_path.rsplit("/", 1)[-1] in RESERVED_FILENAMES:
             continue
 
-        rel_path = str(md_file.relative_to(bundle)).replace("\\", "/")
-        frontmatter = _parse_frontmatter(md_file)
+        text = await read_bundle_file(ctx, bundle_path_str, rel_path)
+        if text is None:
+            continue
 
+        frontmatter = parse_frontmatter(text)
         if frontmatter is None:
             continue
 
@@ -153,14 +156,13 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         if not type_val:
             continue
 
-        try:
-            full_text = md_file.read_text(encoding="utf-8")
-        except OSError:
-            full_text = ""
-
-        body = _extract_body(full_text)
-        # Truncate body for structured output — full body is available on disk
-        body_preview = body[:2000]
+        body = _extract_body(text)
+        # Truncation is opt-in via the ``truncate_body`` parameter so that
+        # callers who want the full text (e.g. a backend reading concepts)
+        # get it. Default remains 2000 for backwards compatibility with
+        # chat-mode summaries where token budget matters.
+        truncate = ctx.params.get("truncate_body", True)
+        body_preview = body[:2000] if truncate else body
 
         generated_by, generated_at = _generated_info(frontmatter)
 

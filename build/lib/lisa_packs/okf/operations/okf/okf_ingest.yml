@@ -1,6 +1,6 @@
 type: Lisa Operation
 title: OKF Ingest
-description: Read an OKF v0.2 bundle directory and return its concepts as structured data. Walks the directory tree, parses frontmatter from every non-reserved .md file, and returns a list of concept documents with their paths, frontmatter, and body text.
+description: Read an OKF v0.2 bundle via lisa-storage (list_files + read_file) and return its concepts as structured data. Walks the bundle, parses frontmatter from every non-reserved .md file, and returns a list of concept documents with their paths, frontmatter, and body text. bundle_path is a sandbox-relative path (e.g. 'okf/my-bundle').
 tags: [okf, ingestion, parsing]
 status: stable
 generated: { by: human:adam, at: 2026-07-25T00:00:00Z }

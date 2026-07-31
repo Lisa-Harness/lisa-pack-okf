@@ -1,15 +1,14 @@
 """OKF export memory operation — export memory records to an OKF v0.2 bundle.
 
 No-LLM deterministic export: calls ``memory.list`` to retrieve records,
-then writes each as an OKF concept document. Uses the shared OKF helpers
-for frontmatter formatting and file writing.
+then writes each as an OKF concept document through the ``lisa-storage``
+MCP server's ``write_file`` tool — never touches the filesystem directly.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -17,7 +16,6 @@ from kernel.models import OperationExecutionContext, OperationResult, ToolExecut
 from lisa_packs.okf.utils.okf_helpers import (
     format_okf_frontmatter,
     sanitize_filename,
-    write_concept_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,7 +26,7 @@ class Parameters(BaseModel):
 
     bundle_path: str = Field(
         ...,
-        description="Absolute path to the OKF bundle directory to write into. Created if it doesn't exist.",
+        description="Relative path within the lisa-storage files sandbox for the OKF bundle directory (e.g. 'okf/my-bundle'). Created if it doesn't exist.",
     )
     limit: int = Field(
         default=100,
@@ -50,11 +48,15 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
             output_text="OKF export memory failed: bundle_path is required.",
         )
 
+    # Reject parent traversal — the storage server re-validates, but
+    # we fail early with a clearer error.
+    if ".." in bundle_path_str.replace("\\", "/").split("/"):
+        return OperationResult(
+            output_text="OKF export memory failed: bundle_path may not contain '..' segments.",
+        )
+
     limit = int(ctx.params.get("limit", 100) or 100)
     limit = max(1, min(limit, 1000))
-
-    bundle = Path(bundle_path_str)
-    bundle.mkdir(parents=True, exist_ok=True)
 
     if not callable(ctx.execute_tool_fn):
         return OperationResult(
@@ -170,10 +172,34 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
             tags=tags if tags else None,
         )
 
+        full_content = frontmatter + f"\n{body}\n"
+        full_path = f"{bundle_path_str}/{concept_path}"
+
         try:
-            write_concept_file(bundle, concept_path, frontmatter, body)
-            exported += 1
-        except OSError as exc:
+            write_result = await ctx.execute_tool_fn(
+                "write_file",
+                ToolExecutionContext(
+                    tool_id="write_file",
+                    workspace_id=ctx.workspace_id,
+                    user_id=ctx.user_id,
+                    user_slug=ctx.user_slug,
+                    surface_id=ctx.surface_id,
+                    memory_scope=ctx.memory_scope,
+                    mode_id=ctx.mode_id,
+                    parameters={"path": full_path, "content": full_content},
+                ),
+            )
+            result_data = json.loads(write_result.output_text or "{}")
+            if result_data.get("ok"):
+                exported += 1
+            else:
+                logger.warning(
+                    "Failed to write OKF concept %s: %s",
+                    concept_path,
+                    result_data.get("error", "unknown"),
+                )
+                skipped += 1
+        except Exception as exc:  # pylint: disable=broad-except
             logger.warning("Failed to write OKF concept %s: %s", concept_path, exc)
             skipped += 1
 
