@@ -1,16 +1,27 @@
 """Shared OKF helpers for the OKF pack.
 
-Extracted from okf_emit_concept so that okf_export_memory can reuse
-the same frontmatter formatting and file-writing logic without
-duplicating code.
+Pure functions for frontmatter, log-entry, and index formatting, plus
+storage-backed I/O helpers that route every bundle read and write
+through the ``lisa-storage`` MCP server (``write_file`` / ``read_file`` /
+``list_files`` / ``make_dir``). The OKF pack never touches the host
+filesystem directly — every bundle lives under the storage sandbox
+(``data_dir/files``), addressed by sandbox-relative paths.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import yaml
+
+if TYPE_CHECKING:
+    from kernel.models import OperationExecutionContext, ToolExecutionContext
+
+logger = logging.getLogger(__name__)
 
 
 def format_okf_frontmatter(
@@ -68,36 +79,6 @@ def format_okf_frontmatter(
 
     yaml_text = yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)
     return f"---\n{yaml_text}---\n"
-
-
-def write_concept_file(
-    bundle: Path,
-    concept_path: str,
-    frontmatter: str,
-    body: str = "",
-) -> Path:
-    """Write a single OKF concept document to a bundle directory.
-
-    Creates parent directories as needed. Returns the written file path.
-
-    Args:
-        bundle: The bundle root directory.
-        concept_path: Relative path within the bundle (e.g. ``modes/learn.md``).
-        frontmatter: The YAML frontmatter block (including ``---`` delimiters).
-        body: The markdown body content.
-    """
-    if not concept_path.endswith(".md"):
-        concept_path = concept_path + ".md"
-
-    concept_file = bundle / concept_path
-    concept_file.parent.mkdir(parents=True, exist_ok=True)
-
-    content = frontmatter
-    if body:
-        content += f"\n{body}\n"
-
-    concept_file.write_text(content, encoding="utf-8")
-    return concept_file
 
 
 def sanitize_filename(name: str) -> str:
@@ -173,9 +154,13 @@ def build_log_entry(
 
 
 def append_log_entry(bundle: Path, entry: str) -> Path:
-    """Append a line to the bundle's ``log.md``, creating the file if needed.
+    """[Deprecated filesystem variant — kept only for legacy callers.]
 
-    Returns the path to ``log.md``.
+    New OKF code routes log appends through :func:`append_log_entry_storage`
+    so ``log.md`` lives under the ``lisa-storage`` sandbox like every
+    other bundle file. This synchronous ``pathlib`` version is retained
+    for any out-of-band tooling that operates on a checked-out bundle on
+    disk; the pack operations themselves do not call it.
     """
     log_path = bundle / "log.md"
     if log_path.exists():
@@ -190,3 +175,217 @@ def append_log_entry(bundle: Path, entry: str) -> Path:
             encoding="utf-8",
         )
     return log_path
+
+
+# ---------------------------------------------------------------------------
+# Storage-backed I/O helpers (lisa-storage MCP server)
+# ---------------------------------------------------------------------------
+
+
+def _tool_ctx_from(
+    ctx: OperationExecutionContext,
+    tool_id: str,
+    parameters: dict[str, Any],
+) -> ToolExecutionContext:
+    """Build a ToolExecutionContext mirroring the caller's operation context."""
+    from kernel.models import ToolExecutionContext
+
+    return ToolExecutionContext(
+        tool_id=tool_id,
+        workspace_id=ctx.workspace_id,
+        user_id=ctx.user_id,
+        user_slug=ctx.user_slug,
+        surface_id=ctx.surface_id,
+        memory_scope=ctx.memory_scope,
+        mode_id=ctx.mode_id,
+        parameters=parameters,
+    )
+
+
+async def storage_call(
+    ctx: OperationExecutionContext,
+    tool_id: str,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Invoke a ``lisa-storage`` tool and return its parsed JSON result.
+
+    Storage tools always return a JSON string (either ``{"ok": ...}`` or
+    ``{"error": ...}``). This helper centralizes the execute → parse path
+    so every operation handles storage failures the same way. Raises
+    ``TypeError`` if the tool executor is not injected or the call
+    itself throws — callers wrap broad-except around it when they want
+    degradation rather than a hard failure.
+    """
+    if not callable(ctx.execute_tool_fn):
+        raise TypeError("tool execution not injected (lisa-storage unavailable)")
+    result = await ctx.execute_tool_fn(tool_id, _tool_ctx_from(ctx, tool_id, parameters))
+    text = getattr(result, "output_text", "") or ""
+    try:
+        parsed = json.loads(text) if text else {}
+    except (json.JSONDecodeError, TypeError):
+        # ``read_file`` returns raw file content (not JSON) on success;
+        # surface it under a ``content`` key so callers can tell.
+        return {"ok": True, "content": text}
+    return parsed if isinstance(parsed, dict) else {"ok": True, "raw": parsed}
+
+
+def _bundle_rel(bundle_path_str: str, *parts: str) -> str:
+    """Join a sandbox-relative bundle path with sub-path parts.
+
+    Normalizes backslashes to forward slashes and strips duplicate
+    slashes so the result is a single clean sandbox-relative path
+    (e.g. ``okf/my-bundle/log.md``).
+    """
+    segments = [bundle_path_str.strip().strip("/"), *(p.strip().strip("/") for p in parts)]
+    joined = "/".join(s for s in segments if s)
+    return joined.replace("\\", "/")
+
+
+async def read_bundle_file(
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+    rel_path: str,
+) -> str | None:
+    """Read a file from a bundle via ``lisa-storage`` ``read_file``.
+
+    Returns the file content as a string, or ``None`` if the file does
+    not exist or the read fails. A storage error JSON body is mapped to
+    ``None`` (callers treat missing files as "not yet created"); a
+    thrown exception propagates to the caller's broad-except handler.
+    """
+    full = _bundle_rel(bundle_path_str, rel_path)
+    data = await storage_call(ctx, "read_file", {"path": full})
+    if "error" in data:
+        return None
+    # ``read_file`` success returns raw text → storage_call surfaces it
+    # under ``content``. A non-error JSON dict without ``content`` would
+    # be an unexpected shape; treat it as empty.
+    return str(data.get("content", "")) if "content" in data else ""
+
+
+async def list_bundle_files(
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+) -> list[str]:
+    """List all files in a bundle via ``lisa-storage`` ``list_files``.
+
+    Returns sandbox-relative paths (e.g. ``okf/my-bundle/modes/learn.md``)
+    sorted, or an empty list if the bundle does not exist or listing
+    fails. The storage server filters reserved/denied paths itself.
+    """
+    data = await storage_call(ctx, "list_files", {"prefix": bundle_path_str})
+    if "error" in data:
+        return []
+    files = data.get("raw", data.get("content", []))
+    if isinstance(files, list):
+        return [str(f) for f in files if isinstance(f, str)]
+    return []
+
+
+async def write_bundle_file(
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+    rel_path: str,
+    content: str,
+) -> bool:
+    """Write a file into a bundle via ``lisa-storage`` ``write_file``.
+
+    Parent directories are created by the storage server. Returns
+    ``True`` on success, ``False`` on a storage error.
+    """
+    full = _bundle_rel(bundle_path_str, rel_path)
+    data = await storage_call(ctx, "write_file", {"path": full, "content": content})
+    return bool(data.get("ok"))
+
+
+async def ensure_bundle_dir(
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+) -> bool:
+    """Ensure the bundle directory exists under the storage sandbox.
+
+    ``make_dir`` is idempotent (``exist_ok=True``). Returns ``True`` on
+    success, ``False`` on a storage error.
+    """
+    data = await storage_call(ctx, "make_dir", {"path": bundle_path_str.strip().strip("/")})
+    return bool(data.get("ok"))
+
+
+async def append_log_entry_storage(
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+    entry: str,
+) -> bool:
+    """Append a line to the bundle's ``log.md`` through ``lisa-storage``.
+
+    Reads the existing ``log.md`` (if any), appends the entry on its own
+    line, and writes the whole file back via ``write_file``. There is no
+    append primitive in ``lisa-storage``; read-rewrite is the contract.
+    Creates ``log.md`` with a header if it does not yet exist.
+
+    Returns ``True`` on success, ``False`` if the write fails.
+    """
+    existing = await read_bundle_file(ctx, bundle_path_str, "log.md")
+    if existing is None:
+        body = f"# Bundle Log\n\n{entry}\n"
+    else:
+        if existing and not existing.endswith("\n"):
+            existing += "\n"
+        body = existing + entry + "\n"
+    return await write_bundle_file(ctx, bundle_path_str, "log.md", body)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate detection (resource-as-identity)
+# ---------------------------------------------------------------------------
+
+# Reserved filenames excluded from duplicate scans (OKF v0.2 §3.1).
+# Duplicated here from the ops so the helper is self-contained.
+RESERVED_FILENAMES: frozenset[str] = frozenset({"index.md", "log.md"})
+
+
+def parse_frontmatter(text: str) -> dict[str, object] | None:
+    """Parse YAML frontmatter from a markdown file's text.
+
+    Returns the parsed dict, or ``None`` if no parseable frontmatter block
+    is found. Shared by emit/validate dedup scans so every caller parses
+    frontmatter the same way.
+    """
+    if not text.startswith("---"):
+        return None
+    end_idx = text.find("---", 3)
+    if end_idx == -1:
+        return None
+    frontmatter_text = text[3:end_idx].strip()
+    if not frontmatter_text:
+        return None
+    try:
+        parsed = yaml.safe_load(frontmatter_text)
+    except yaml.YAMLError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def extract_resource(frontmatter: dict[str, object]) -> str:
+    """Return the canonical ``resource`` URI from frontmatter, or ''.
+
+    The ``resource`` field is the OKF concept identity key (one concept
+    == one ``resource`` per bundle). An empty value means the concept
+    has no identity key and dedup is skipped for it.
+    """
+    val = frontmatter.get("resource")
+    if isinstance(val, str):
+        return val.strip()
+    return ""
+
+
+def is_duplicate_concept_path(candidate: str, existing: str) -> bool:
+    """Return True if ``candidate`` and ``existing`` reference the same file.
+
+    Path comparison is case-insensitive and slash-agnostic (``\\`` vs ``/``)
+    so a Windows caller and a Unix-written bundle agree on identity.
+    """
+    def _norm(p: str) -> str:
+        return p.strip().replace("\\", "/").lstrip("/").lower()
+
+    return _norm(candidate) == _norm(existing)

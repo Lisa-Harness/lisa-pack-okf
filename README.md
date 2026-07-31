@@ -20,16 +20,16 @@ Seven deterministic, no-LLM operations covering the full bundle lifecycle:
 
 | Operation | Purpose |
 | --- | --- |
-| `okf_init` | Scaffold a conformant bundle directory with `index.md` + `log.md` stubs. The `git init` for OKF bundles. Refuses non-empty dirs unless `force=True`. |
-| `okf_reindex` | Walk the bundle, regenerate `index.md` from current concepts, append a `reindex` entry to `log.md`. Preserves the existing index title unless overridden. |
-| `okf_log` | Append a structured, timestamped entry to `log.md`. Low-level primitive used by `init`/`reindex` and exposed first-class for out-of-band events (reviewed, imported, exported). |
+| `okf_init` | Scaffold a conformant bundle directory with `index.md` + `log.md` stubs under the `lisa-storage` sandbox. The `git init` for OKF bundles. Refuses non-empty bundles unless `force=True`. |
+| `okf_reindex` | Walk the bundle via `lisa-storage`, regenerate `index.md` from current concepts, append a `reindex` entry to `log.md`. Preserves the existing index title unless overridden. |
+| `okf_log` | Append a structured, timestamped entry to `log.md` via `lisa-storage` (read-rewrite). Low-level primitive used by `init`/`reindex` and exposed first-class for out-of-band events (reviewed, imported, exported). |
 
 ### Concept I/O
 
 | Operation | Purpose |
 | --- | --- |
-| `okf_validate` | Check a directory for OKF v0.2 conformance. Strict mode additionally checks `status` enum, `stale_after` date format, `generated.at` presence, and `sources[].resource` shape. |
-| `okf_ingest` | Read an OKF bundle and return its concepts as structured data. Body truncation is opt-in via `truncate_body` (default `True` for backwards compatibility; pass `False` for full text). |
+| `okf_validate` | Check a bundle for OKF v0.2 conformance via `lisa-storage`. Strict mode additionally checks `status` enum, `stale_after` date format, `generated.at` presence, and `sources[].resource` shape. |
+| `okf_ingest` | Read an OKF bundle via `lisa-storage` and return its concepts as structured data. Body truncation is opt-in via `truncate_body` (default `True` for backwards compatibility; pass `False` for full text). |
 | `okf_emit_concept` | Write a single OKF concept document to a bundle directory via the `lisa-storage` MCP server's `write_file` tool. Accepts full provenance: `generated_by`, `resource`, `stale_after`, `status`, `tags`, `body`. |
 | `okf_export_memory` | Export memory records to an OKF bundle. Calls `memory.list` to retrieve records, then writes each as a conformant concept document under `memories/` in the bundle via `lisa-storage` `write_file`. |
 
@@ -80,13 +80,14 @@ Step-by-step body content in markdown.
 
 - Python ≥ 3.11
 - `pyyaml>=6.0` (declared in `pyproject.toml`)
-- Lisa framework on `PYTHONPATH` (provides `kernel.models`, the operation
-  execution context, and the `lisa-storage` MCP server used by write
-  operations)
-- For `okf_emit_concept` and `okf_export_memory`: a host that injects
-  `ctx.execute_tool_fn` wired to `lisa-storage`'s `write_file` tool, and
-  (for export) `memory.list`. These operations fail loudly if the tool
-  executor is not injected.
+- Lisa framework on `PYTHONPATH` (provides `kernel.models` and the
+  operation execution context)
+- A host that injects `ctx.execute_tool_fn` wired to the `lisa-storage`
+  MCP server's `write_file` / `read_file` / `list_files` / `make_dir`
+  tools. **All seven operations** route every read and write through
+  `lisa-storage`; none touch the host filesystem directly. For
+  `okf_export_memory` the host must also wire `memory.list`. Operations
+  fail loudly if the tool executor is not injected.
 
 ## Installation
 
@@ -148,26 +149,33 @@ restricts which operations the model can invoke while OKF mode is active.
 ## Configuration
 
 There are **no environment variables, API keys, or secrets** to configure.
-The pack has no MCP server, no `mcp_servers.yaml`, and no external service
-dependencies. All operations are pure local computation:
+The pack has no MCP server of its own, no `mcp_servers.yaml`, and no external
+service dependencies. All seven operations route every read and write through
+the host's `lisa-storage` MCP server (`write_file`, `read_file`,
+`list_files`, `make_dir`), sandboxed to the host's `data_dir/files` root.
+The pack never touches the host filesystem directly.
 
-- Read operations (`okf_validate`, `okf_ingest`, `okf_init`, `okf_reindex`,
-  `okf_log`) use `pathlib` directly against the bundle path you pass.
-- Write operations (`okf_emit_concept`, `okf_export_memory`) go through the
-  `lisa-storage` MCP server's `write_file` tool, sandboxed to the host's
-  files root. Pass `bundle_path` as a sandbox-relative path
-  (e.g. `okf/my-bundle`), not an absolute filesystem path.
+- Read operations (`okf_validate`, `okf_ingest`) walk the bundle via
+  `list_files` + `read_file`.
+- Bundle lifecycle writes (`okf_init`, `okf_reindex`, `okf_log`) use
+  `make_dir` + `write_file` (and `read_file` for `log.md` read-rewrite,
+  since `lisa-storage` has no append primitive).
+- Concept writes (`okf_emit_concept`, `okf_export_memory`) go through
+  `write_file`.
 
 ### Path conventions
 
+All operations take `bundle_path` as a **sandbox-relative path** under the
+host's `data_dir/files` root (e.g. `okf/my-bundle`), never an absolute
+filesystem path.
+
 | Operation | `bundle_path` expects |
 | --- | --- |
-| `okf_init`, `okf_reindex`, `okf_log`, `okf_validate`, `okf_ingest` | Absolute filesystem path to a directory |
-| `okf_emit_concept`, `okf_export_memory` | Relative path within the `lisa-storage` files sandbox (e.g. `okf/my-bundle`) |
+| `okf_init`, `okf_validate`, `okf_ingest`, `okf_reindex`, `okf_log`, `okf_emit_concept`, `okf_export_memory` | Relative path within the `lisa-storage` files sandbox (e.g. `okf/my-bundle`) |
 
-Parent traversal (`..`) is rejected by the sandboxed write operations before
-the storage server re-validates. Reserved filenames (`index.md`, `log.md`)
-cannot be used as concept paths in `okf_emit_concept`.
+Parent traversal (`..`) is rejected by every operation before the storage
+server re-validates. Reserved filenames (`index.md`, `log.md`) cannot be
+used as concept paths in `okf_emit_concept`.
 
 ## Operation reference
 
@@ -177,10 +185,10 @@ Scaffold a conformant OKF bundle directory.
 
 | Parameter | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `bundle_path` | str | required | Absolute path for the new bundle directory. Created if missing. |
+| `bundle_path` | str | required | Relative path within the `lisa-storage` files sandbox for the new bundle directory (e.g. `okf/my-bundle`). Created if missing. |
 | `title` | str | `""` | Human-readable name for the bundle (written into `index.md`). |
 | `description` | str | `""` | One-line description (written into `index.md`). |
-| `force` | bool | `False` | Allow scaffolding into a non-empty directory. |
+| `force` | bool | `False` | Allow scaffolding into a non-empty bundle. |
 
 Creates `index.md` (stub listing) and `log.md` (seeded with a `scaffold` entry).
 Refuses a non-empty directory unless `force=True`.
@@ -191,7 +199,7 @@ Regenerate `index.md` from the bundle's current concepts.
 
 | Parameter | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `bundle_path` | str | required | Absolute path to the OKF bundle directory. |
+| `bundle_path` | str | required | Relative path within the `lisa-storage` files sandbox (e.g. `okf/my-bundle`). |
 | `title` | str | `""` | Override title for `index.md`. If empty, keeps the existing index title or uses the bundle name. |
 
 Walks the bundle, parses frontmatter from every non-reserved `.md` file,
@@ -204,7 +212,7 @@ Append a structured, timestamped entry to `log.md`.
 
 | Parameter | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `bundle_path` | str | required | Absolute path to the OKF bundle directory. |
+| `bundle_path` | str | required | Relative path within the `lisa-storage` files sandbox (e.g. `okf/my-bundle`). |
 | `action` | str | required | Short verb (`reviewed`, `imported`, `exported`, …). |
 | `concept_path` | str | `""` | Relative path of the affected concept, if any. |
 | `by` | str | `lisa-pack-okf/0.1.0` | Actor string for the log entry. |
@@ -218,7 +226,7 @@ Check a directory for OKF v0.2 conformance.
 
 | Parameter | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `bundle_path` | str | required | Absolute path to the OKF bundle directory. |
+| `bundle_path` | str | required | Relative path within the `lisa-storage` files sandbox (e.g. `okf/my-bundle`). |
 | `strict` | bool | `False` | If `True`, additionally check `status` enum, `stale_after` date format, `generated.at` presence, `sources[].resource` shape, and `index.md`/`log.md` structure when present. |
 | `include_strict` | bool | `False` | If `True`, strict violations also mark the bundle non-conformant. |
 
@@ -233,7 +241,7 @@ Read an OKF bundle and return its concepts as structured data.
 
 | Parameter | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `bundle_path` | str | required | Absolute path to the OKF bundle directory. |
+| `bundle_path` | str | required | Relative path within the `lisa-storage` files sandbox (e.g. `okf/my-bundle`). |
 | `truncate_body` | bool | `True` | If `True`, truncate each concept body to 2000 chars. Pass `False` for full body text. |
 
 Returns an `OkfBundle` JSON with a `concepts[]` list of `OkfConcept` objects

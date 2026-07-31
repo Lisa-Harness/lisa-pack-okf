@@ -14,7 +14,13 @@ import logging
 from pydantic import BaseModel, Field
 
 from kernel.models import OperationExecutionContext, OperationResult, ToolExecutionContext
-from lisa_packs.okf.utils.okf_helpers import format_okf_frontmatter
+from lisa_packs.okf.utils.okf_helpers import (
+    RESERVED_FILENAMES,
+    extract_resource,
+    format_okf_frontmatter,
+    is_duplicate_concept_path,
+    parse_frontmatter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +121,33 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
             output_text="OKF emit failed: tool execution not injected (lisa-storage write_file unavailable).",
         )
 
+    # Combine bundle_path + concept_path into a single sandbox-relative path.
+    full_path = f"{bundle_path_str}/{concept_path_str}"
+    if not full_path.endswith(".md"):
+        full_path += ".md"
+
+    # Resource-as-identity dedup (2026-07-28): refuse to emit a concept
+    # whose canonical ``resource`` URI already exists at a DIFFERENT path
+    # in the bundle. Same-path re-emit is an idempotent update and stays
+    # allowed. Skipped when ``resource`` is empty (no identity key).
+    if resource_str:
+        existing = await _find_duplicate_resource(
+            ctx=ctx,
+            bundle_path_str=bundle_path_str,
+            resource_str=resource_str,
+            concept_full_path=full_path,
+        )
+        if existing is not None:
+            return OperationResult(
+                output_text=(
+                    f"OKF emit failed: a concept with resource '{resource_str}' "
+                    f"already exists at '{existing}'. Re-emit at the same path "
+                    f"to update in place, or delete the stale copy first. "
+                    f"(Refusing to create a duplicate — resource is the OKF "
+                    f"concept identity key.)"
+                ),
+            )
+
     frontmatter = format_okf_frontmatter(
         concept_type=type_str,
         title=title_str,
@@ -129,11 +162,6 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
     content = frontmatter
     if body_str:
         content += f"\n{body_str}\n"
-
-    # Combine bundle_path + concept_path into a single sandbox-relative path.
-    full_path = f"{bundle_path_str}/{concept_path_str}"
-    if not full_path.endswith(".md"):
-        full_path += ".md"
 
     tool_result = await ctx.execute_tool_fn(
         "write_file",
@@ -163,3 +191,91 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
             f"  bundle: {bundle_path_str}"
         ),
     )
+
+
+async def _find_duplicate_resource(
+    *,
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+    resource_str: str,
+    concept_full_path: str,
+) -> str | None:
+    """Return the existing path of a concept with the same ``resource``.
+
+    Scans the bundle via the ``lisa-storage`` ``list_files`` and ``read_file``
+    tools (never touches the filesystem directly). Returns the relative
+    bundle path of the first existing concept whose ``resource`` matches
+    ``resource_str`` AND whose path differs from ``concept_full_path``
+    (same-path re-emit is an idempotent update, not a duplicate). Returns
+    ``None`` when no duplicate is found, when the bundle is empty, or when
+    a storage tool call fails (dedup degrades to a no-op rather than
+    blocking a legitimate emit on a transient storage error — the write
+    itself still goes through ``write_file`` which re-validates paths).
+    """
+    try:
+        list_result = await ctx.execute_tool_fn(
+            "list_files",
+            ToolExecutionContext(
+                tool_id="list_files",
+                workspace_id=ctx.workspace_id,
+                user_id=ctx.user_id,
+                user_slug=ctx.user_slug,
+                surface_id=ctx.surface_id,
+                memory_scope=ctx.memory_scope,
+                mode_id=ctx.mode_id,
+                parameters={"prefix": bundle_path_str},
+            ),
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("OKF dedup: list_files failed (%s); skipping dedup.", exc)
+        return None
+
+    try:
+        files = json.loads(list_result.output_text or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(files, list):
+        return None
+
+    target_resource = resource_str.strip()
+    if not target_resource:
+        return None
+
+    for rel_path in files:
+        if not isinstance(rel_path, str) or not rel_path.endswith(".md"):
+            continue
+        # Skip reserved filenames (index.md / log.md live at the bundle root
+        # and are not concepts).
+        if rel_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] in RESERVED_FILENAMES:
+            continue
+        # Same-path re-emit is an update, not a duplicate.
+        if is_duplicate_concept_path(rel_path, concept_full_path):
+            continue
+        try:
+            read_result = await ctx.execute_tool_fn(
+                "read_file",
+                ToolExecutionContext(
+                    tool_id="read_file",
+                    workspace_id=ctx.workspace_id,
+                    user_id=ctx.user_id,
+                    user_slug=ctx.user_slug,
+                    surface_id=ctx.surface_id,
+                    memory_scope=ctx.memory_scope,
+                    mode_id=ctx.mode_id,
+                    parameters={"path": rel_path},
+                ),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("OKF dedup: read_file failed for %s (%s).", rel_path, exc)
+            continue
+        text = read_result.output_text or ""
+        # A read_file error comes back as a JSON body, not markdown —
+        # parse_frontmatter returns None for non-markdown text, so this
+        # is safely skipped.
+        frontmatter = parse_frontmatter(text)
+        if frontmatter is None:
+            continue
+        if extract_resource(frontmatter) == target_resource:
+            return rel_path
+
+    return None

@@ -28,7 +28,7 @@ routing_intent_keywords:
     - export memory
     - okf concept
 allowed_operation_ids: [okf_init, okf_validate, okf_ingest, okf_emit_concept, okf_export_memory, okf_reindex, okf_log]
-allowed_tool_ids: [memory.list]
+allowed_tool_ids: [memory.list, lisa-storage.write_file, lisa-storage.read_file, lisa-storage.list_files, lisa-storage.make_dir]
 description: "OKF workflow mode for initializing, validating, ingesting, emitting, reindexing, logging, and exporting Open Knowledge Format bundles."
 command_pattern: '^(?:(?:/)?(?:okf)(?:[\s,:;]+|(?=$)))(?P<query>.*)$'
 ---
@@ -38,20 +38,27 @@ Work with Open Knowledge Format (OKF) v0.2 bundles — directories of markdown
 files with YAML frontmatter that represent knowledge in a vendor-neutral,
 human-and-agent-friendly format.
 
+All seven operations read and write exclusively through the `lisa-storage`
+MCP server (`write_file`, `read_file`, `list_files`, `make_dir`). The pack
+never touches the host filesystem directly; every `bundle_path` is a
+sandbox-relative path under the host's `data_dir/files` root (e.g.
+`okf/my-bundle`), not an absolute filesystem path. Parent traversal (`..`)
+is rejected before the storage server re-validates.
+
 ## Available operations
 
 Bundle lifecycle:
 
-- `okf_init` — scaffold a conformant bundle directory with `index.md` + `log.md` stubs
-- `okf_reindex` — regenerate `index.md` from the bundle's current concepts
-- `okf_log` — append a structured, timestamped entry to `log.md`
+- `okf_init` — scaffold a conformant bundle directory with `index.md` + `log.md` stubs (`make_dir` + `write_file`)
+- `okf_reindex` — regenerate `index.md` from the bundle's current concepts (`list_files` + `read_file` + `write_file`)
+- `okf_log` — append a structured, timestamped entry to `log.md` (read-rewrite via `read_file` + `write_file`; no append primitive in `lisa-storage`)
 
 Concept I/O:
 
-- `okf_validate` — check a directory for OKF v0.2 conformance (strict mode checks `status`, `stale_after`, `generated.at`, `sources[].resource`)
+- `okf_validate` — check a bundle for OKF v0.2 conformance (strict mode checks `status`, `stale_after`, `generated.at`, `sources[].resource`)
 - `okf_ingest` — read an OKF bundle and return its concepts as structured data (full body when `truncate_body=False`)
-- `okf_emit_concept` — write a single OKF concept document with full provenance (`generated_by`, `resource`, `stale_after`, `sources`)
-- `okf_export_memory` — export memory records to an OKF bundle (calls `memory.list`)
+- `okf_emit_concept` — write a single OKF concept document with full provenance (`generated_by`, `resource`, `stale_after`, `sources`) via `write_file`
+- `okf_export_memory` — export memory records to an OKF bundle (calls `memory.list`, writes via `write_file`)
 
 ## OKF v0.2 quick reference
 

@@ -1,6 +1,6 @@
 type: Lisa Operation
 title: OKF Init
-description: Scaffold a conformant OKF v0.2 bundle directory with index.md and log.md stubs. The first-run experience for a new bundle — analogous to `git init` for knowledge bundles. Creates the directory if it doesn't exist and refuses to clobber a non-empty directory unless force=True is passed.
+description: Scaffold a conformant OKF v0.2 bundle directory with index.md and log.md stubs under the lisa-storage files sandbox. The first-run experience for a new bundle — analogous to `git init` for knowledge bundles. Creates the directory via make_dir and refuses to clobber a non-empty bundle unless force=True is passed. bundle_path is a sandbox-relative path (e.g. 'okf/my-bundle'), not an absolute filesystem path.
 tags: [okf, init, scaffold, bundle]
 status: stable
 generated: { by: human:adam, at: 2026-07-28T00:00:00Z }

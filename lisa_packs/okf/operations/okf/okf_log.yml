@@ -1,6 +1,6 @@
 type: Lisa Operation
 title: OKF Log
-description: Append a structured, timestamped entry to a bundle's log.md. Low-level primitive used by other OKF operations (init, reindex, emit, verify) and exposed as a first-class operation so humans or external tools can record out-of-band events (reviewed, imported, exported, etc.).
+description: Append a structured, timestamped entry to a bundle's log.md via lisa-storage (read-rewrite; there is no append primitive). Low-level primitive used by other OKF operations (init, reindex, emit, verify) and exposed as a first-class operation so humans or external tools can record out-of-band events (reviewed, imported, exported, etc.). bundle_path is a sandbox-relative path (e.g. 'okf/my-bundle').
 tags: [okf, log, audit, provenance]
 status: stable
 generated: { by: human:adam, at: 2026-07-28T00:00:00Z }
