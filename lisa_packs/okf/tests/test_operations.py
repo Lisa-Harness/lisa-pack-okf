@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from lisa_packs.okf.operations.okf import (
+    okf_briefing,
     okf_emit_concept,
     okf_export_memory,
     okf_ingest,
@@ -118,6 +119,7 @@ def _write_concept(
     status: str = "",
     stale_after: str = "",
     resource: str = "",
+    tags: list[str] | None = None,
     body: str = "body text",
 ) -> None:
     """Write a minimal OKF concept file directly into the sandbox."""
@@ -134,6 +136,8 @@ def _write_concept(
         fm_lines.append(f"stale_after: {stale_after}")
     if resource:
         fm_lines.append(f"resource: {resource}")
+    if tags:
+        fm_lines.append("tags: [" + ", ".join(tags) + "]")
     fm_lines.append("---")
     fm_lines.append("")
     fm_lines.append(body)
@@ -630,3 +634,171 @@ def test_export_memory_writes_records_via_storage(tmp_path: Path):
     body = store[written[0]]
     assert "Remember to deploy." in body
     assert "type: Memory Record" in body
+
+
+# ---------------------------------------------------------------------------
+# okf_briefing — deterministic pre-turn context skim
+# ---------------------------------------------------------------------------
+
+WORKING = "okf/working"
+
+
+def test_briefing_empty_when_no_bundle(fake_tool):
+    fake, _ = fake_tool
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "how do I deploy"},
+        execute_tool_fn=fake,
+    )))
+    assert result.output_text == ""
+    assert result.output_json["surfaced_concepts"] == []
+
+
+def test_briefing_empty_for_acknowledgement(fake_tool):
+    fake, sandbox = fake_tool
+    _write_concept(sandbox, WORKING, "deploy.md",
+                   type_str="Playbook", title="Deploy", description="how to deploy")
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "ok"},
+        execute_tool_fn=fake,
+    )))
+    assert result.output_text == ""
+    assert result.output_json["surfaced_concepts"] == []
+
+
+def test_briefing_surfaces_relevant_concept(fake_tool):
+    fake, sandbox = fake_tool
+    _write_concept(sandbox, WORKING, "playbooks/deploy.md",
+                   type_str="Playbook", title="Deploy to staging",
+                   description="Step-by-step deploy procedure",
+                   tags=["deploy", "staging"])
+    _write_concept(sandbox, WORKING, "modes/learn.md",
+                   type_str="Lisa Mode", title="Learn", description="learning mode")
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "how do I deploy to staging"},
+        execute_tool_fn=fake,
+    )))
+    assert result.output_text != ""
+    assert "playbooks/deploy.md" in result.output_text
+    assert "okf/working" in result.output_text
+    assert result.output_json["surfaced_concepts"] == ["playbooks/deploy.md"]
+
+
+def test_briefing_skips_irrelevant_concept(fake_tool):
+    fake, sandbox = fake_tool
+    _write_concept(sandbox, WORKING, "modes/learn.md",
+                   type_str="Lisa Mode", title="Learn", description="learning mode")
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "deploy the database"},
+        execute_tool_fn=fake,
+    )))
+    assert result.output_text == ""
+    assert result.output_json["surfaced_concepts"] == []
+
+
+def test_briefing_skips_deprecated_concept(fake_tool):
+    fake, sandbox = fake_tool
+    _write_concept(sandbox, WORKING, "playbooks/deploy.md",
+                   type_str="Playbook", title="Deploy", description="how to deploy",
+                   status="deprecated")
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "how do I deploy"},
+        execute_tool_fn=fake,
+    )))
+    assert result.output_text == ""
+    assert result.output_json["surfaced_concepts"] == []
+
+
+def test_briefing_skips_stale_concept(fake_tool):
+    fake, sandbox = fake_tool
+    _write_concept(sandbox, WORKING, "playbooks/deploy.md",
+                   type_str="Playbook", title="Deploy", description="how to deploy",
+                   stale_after="2020-01-01")
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "how do I deploy", "today": "2026-08-02"},
+        execute_tool_fn=fake,
+    )))
+    assert result.output_text == ""
+
+
+def test_briefing_mode_intent_tag_boosts(fake_tool):
+    fake, sandbox = fake_tool
+    # Concept tagged 'write' matches markdown mode's intent tag, even
+    # though the query tokens don't overlap.
+    _write_concept(sandbox, WORKING, "notes/style-guide.md",
+                   type_str="Guide", title="Style Guide", description="house style",
+                   tags=["write", "markdown"])
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "revise the intro paragraph", "mode_intent_tags": ["write"]},
+        execute_tool_fn=fake,
+    )))
+    assert "notes/style-guide.md" in result.output_text
+
+
+def test_briefing_respects_max_bullets(fake_tool):
+    fake, sandbox = fake_tool
+    for i in range(5):
+        _write_concept(sandbox, WORKING, f"playbooks/deploy-{i}.md",
+                       type_str="Playbook", title=f"Deploy {i}", description="deploy")
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "deploy", "max_bullets": 2},
+        execute_tool_fn=fake,
+    )))
+    assert len(result.output_json["surfaced_concepts"]) == 2
+
+
+def test_briefing_respects_max_bytes(fake_tool):
+    fake, sandbox = fake_tool
+    _write_concept(sandbox, WORKING, "playbooks/deploy.md",
+                   type_str="Playbook", title="Deploy", description="x" * 200)
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "deploy", "max_bytes": 50},
+        execute_tool_fn=fake,
+    )))
+    assert result.output_text == ""
+
+
+def test_briefing_default_bundle_path_is_okf_working(fake_tool):
+    fake, sandbox = fake_tool
+    _write_concept(sandbox, "okf/working", "playbooks/deploy.md",
+                   type_str="Playbook", title="Deploy", description="how to deploy")
+    result = _run(okf_briefing.execute(_ctx(
+        {"query": "how do I deploy"},  # no bundle_path passed
+        execute_tool_fn=fake,
+    )))
+    assert "playbooks/deploy.md" in result.output_text
+    assert result.output_json["bundle_path"] == "okf/working"
+
+
+def test_briefing_no_storage_injected_returns_empty_not_error():
+    """A bare host without execute_tool_fn gets an empty briefing, not a crash."""
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "how do I deploy"},
+    )))
+    assert result.output_text == ""
+    assert result.output_json["surfaced_concepts"] == []
+
+
+def test_briefing_skips_reserved_filenames(fake_tool):
+    fake, sandbox = fake_tool
+    # index.md should not be surfaced even if it parses.
+    (sandbox / WORKING).mkdir(parents=True, exist_ok=True)
+    (sandbox / WORKING / "index.md").write_text(
+        "---\ntype: OKF Bundle Index\ntitle: Working\n---\n# Working\n",
+        encoding="utf-8",
+    )
+    _write_concept(sandbox, WORKING, "playbooks/deploy.md",
+                   type_str="Playbook", title="Deploy", description="how to deploy")
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": WORKING, "query": "deploy or index"},
+        execute_tool_fn=fake,
+    )))
+    assert "index.md" not in result.output_text
+    assert "playbooks/deploy.md" in result.output_text
+
+
+def test_briefing_rejects_parent_traversal():
+    result = _run(okf_briefing.execute(_ctx(
+        {"bundle_path": "../escape", "query": "deploy"},
+        execute_tool_fn=lambda *_a: None,
+    )))
+    assert "may not contain '..'" in result.output_text

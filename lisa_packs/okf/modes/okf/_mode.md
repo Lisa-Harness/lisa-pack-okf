@@ -12,6 +12,7 @@ mode_kind: chat
 require_query: true
 routable: true
 priority: 8
+pre_turn_operation_ids: [okf_briefing]
 routing_intent_tags: [okf]
 satisfies_intents: [okf]
 routing_intent_keywords:
@@ -27,7 +28,7 @@ routing_intent_keywords:
     - log okf
     - export memory
     - okf concept
-allowed_operation_ids: [okf_init, okf_validate, okf_ingest, okf_emit_concept, okf_export_memory, okf_reindex, okf_log]
+allowed_operation_ids: [okf_init, okf_validate, okf_ingest, okf_emit_concept, okf_export_memory, okf_reindex, okf_log, okf_briefing]
 required_capabilities: [tools]
 allowed_tool_ids: [memory.list, lisa-storage.write_file, lisa-storage.read_file, lisa-storage.list_files, lisa-storage.make_dir]
 description: "OKF workflow mode for initializing, validating, ingesting, emitting, reindexing, logging, and exporting Open Knowledge Format bundles."
@@ -60,6 +61,10 @@ Concept I/O:
 - `okf_ingest` — read an OKF bundle and return its concepts as structured data (full body when `truncate_body=False`)
 - `okf_emit_concept` — write a single OKF concept document with full provenance (`generated_by`, `resource`, `stale_after`, `sources`) via `write_file`
 - `okf_export_memory` — export memory records to an OKF bundle (calls `memory.list`, writes via `write_file`)
+
+Working memory:
+
+- `okf_briefing` — deterministic pre-turn skim of the working bundle (`okf/working` by default). Surfaces non-stale `stable` concepts whose `type`/`title`/`description`/`tags` overlap the user's query as a compact cited bullet list, or empty when nothing is relevant. Wired as a `pre_turn_operation_ids` entry on this mode (and on `markdown`), so the model gets a bounded advisory block of relevant concepts before the main turn — a skim, not a dump. Call `read_file` on a cited path for the full text.
 
 ## OKF v0.2 quick reference
 

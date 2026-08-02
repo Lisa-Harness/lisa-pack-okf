@@ -1,0 +1,9 @@
+type: Lisa Operation
+title: OKF Briefing
+description: Deterministic pre-turn context skim. Reads the working OKF bundle via lisa-storage (list_files + read_file), filters to non-stale stable concepts whose type/title/description/tags overlap the user's query and the active mode's intent tags, and returns a compact cited bullet list (or empty when nothing is relevant). Wired via pre_turn_operation_ids so a mode gets a bounded advisory block of working memory without the full bundle polluting context. bundle_path is a sandbox-relative path (defaults to 'okf/working').
+tags: [okf, briefing, pre-turn, working-memory]
+status: stable
+generated: { by: human:adam, at: 2026-08-02T00:00:00Z }
+operation_id: okf_briefing
+exportable: true
+default_available: true

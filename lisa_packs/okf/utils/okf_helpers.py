@@ -389,3 +389,162 @@ def is_duplicate_concept_path(candidate: str, existing: str) -> bool:
         return p.strip().replace("\\", "/").lstrip("/").lower()
 
     return _norm(candidate) == _norm(existing)
+
+
+# ---------------------------------------------------------------------------
+# Briefing helpers (deterministic, no-LLM pre-turn context skim)
+# ---------------------------------------------------------------------------
+
+# Lifecycle filter: only ``stable`` concepts surface in a briefing by
+# default. ``draft``/``deprecated`` are deliberately excluded so the
+# pre-turn skim does not inject half-baked or retired material into a
+# downstream mode's context. Callers can override via ``include_status``.
+_BRIEFING_DEFAULT_STATUSES: frozenset[str] = frozenset({"stable"})
+
+
+def _stale_after_is_past(stale_after: str, *, today: str | None = None) -> bool:
+    """Return True if a YYYY-MM-DD ``stale_after`` date is in the past."""
+    if not stale_after:
+        return False
+    sa = str(stale_after).strip()
+    if len(sa) != 10 or sa[4] != "-" or sa[7] != "-":
+        return False  # malformed → treat as not stale (don't drop on a guess)
+    ref = today or datetime.now(UTC).strftime("%Y-%m-%d")
+    return sa < ref
+
+
+def score_concept_relevance(
+    concept: dict[str, object],
+    query: str,
+    *,
+    mode_intent_tags: list[str] | None = None,
+) -> int:
+    """Score how relevant a concept is to a user query + active mode.
+
+    Deterministic token-overlap scoring. No LLM, no embeddings. The
+    score is a rough ranking, not a probability; callers use it only
+    to decide which concepts to surface and in what order.
+
+    Inputs are taken from a concept dict with ``type``, ``title``,
+    ``description``, ``tags`` keys (the shape ``okf_ingest`` returns).
+
+    Args:
+        concept: one concept document as a dict.
+        query: the user's turn query (lowercased internally).
+        mode_intent_tags: the active mode's intent tags, used to boost
+            concepts whose ``tags`` overlap the mode's focus.
+
+    Returns:
+        An integer score. Zero means "no overlap" — the concept is
+        irrelevant to this query and should not surface.
+    """
+    q = (query or "").lower()
+    if not q:
+        return 0
+
+    # Tokenize on non-alphanumeric runs; drop very short tokens.
+    import re
+
+    query_tokens = {t for t in re.split(r"[^a-z0-9]+", q) if len(t) >= 3}
+    if not query_tokens:
+        return 0
+
+    haystack_parts = [
+        str(concept.get("title", "") or "").lower(),
+        str(concept.get("description", "") or "").lower(),
+        str(concept.get("type", "") or "").lower(),
+    ]
+    tags_val = concept.get("tags")
+    if isinstance(tags_val, list):
+        haystack_parts.extend(str(t).lower() for t in tags_val if t)
+    haystack = " ".join(haystack_parts)
+    haystack_tokens = set(re.split(r"[^a-z0-9]+", haystack)) if haystack else set()
+
+    score = len(query_tokens & haystack_tokens)
+
+    # Mode-intent tag overlap bonus: a concept tagged for the active
+    # mode's focus gets a small boost even if the query tokens don't
+    # overlap, because it is likely useful background for that mode.
+    if mode_intent_tags:
+        mode_tags_lower = {t.lower() for t in mode_intent_tags}
+        if isinstance(tags_val, list):
+            if any(str(t).lower() in mode_tags_lower for t in tags_val):
+                score += 1
+
+    return score
+
+
+def filter_briefing_concepts(
+    concepts: list[dict[str, object]],
+    *,
+    query: str,
+    mode_intent_tags: list[str] | None = None,
+    include_statuses: frozenset[str] | None = None,
+    today: str | None = None,
+    min_score: int = 1,
+) -> list[dict[str, object]]:
+    """Filter + rank concepts for a pre-turn briefing.
+
+    Returns concepts that are (a) in an allowed lifecycle status
+    (default ``stable``), (b) not past their ``stale_after`` date, and
+    (c) score at least ``min_score`` against the query/mode. Sorted by
+    descending score so callers can take the top N.
+    """
+    statuses = include_statuses or _BRIEFING_DEFAULT_STATUSES
+    kept: list[tuple[int, dict[str, object]]] = []
+    for concept in concepts:
+        status = str(concept.get("status", "stable") or "stable")
+        if status not in statuses:
+            continue
+        if _stale_after_is_past(str(concept.get("stale_after", "") or ""), today=today):
+            continue
+        score = score_concept_relevance(concept, query, mode_intent_tags=mode_intent_tags)
+        if score >= min_score:
+            kept.append((score, concept))
+    kept.sort(key=lambda pair: pair[0], reverse=True)
+    return [c for _, c in kept]
+
+
+def render_briefing(
+    concepts: list[dict[str, object]],
+    *,
+    bundle_path: str,
+    max_bullets: int = 5,
+    max_bytes: int = 1500,
+) -> str:
+    """Render a compact, cited briefing markdown block from concepts.
+
+    Returns the empty string when there are no concepts to surface
+    (the host then renders nothing — no context pollution).
+
+    Each bullet cites the concept's in-bundle path so the model can
+    call ``read_file`` (or ``okf_ingest``) for the full text if the
+    one-line skim looks relevant. The path is relative to the bundle
+    root so the model can construct the full sandbox path as
+    ``{bundle_path}/{concept_path}``.
+    """
+    if not concepts:
+        return ""
+
+    bullets: list[str] = []
+    total = 0
+    header = "**OKF working context:**"
+    # Header + trailing newline cost.
+    total += len(header) + 1
+
+    for concept in concepts[:max_bullets]:
+        path = str(concept.get("path", "") or "")
+        title = str(concept.get("title", "") or "") or path
+        desc = str(concept.get("description", "") or "")
+        line = f"- `{path}` — {title}"
+        if desc:
+            line += f": {desc}"
+        line += f" _(bundle: {bundle_path})_"
+        if total + len(line) + 1 > max_bytes:
+            break
+        bullets.append(line)
+        total += len(line) + 1
+
+    if not bullets:
+        return ""
+    return header + "\n" + "\n".join(bullets)
