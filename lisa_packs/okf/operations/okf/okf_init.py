@@ -68,13 +68,18 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
 
     bundle_name = bundle_path_str.rsplit("/", 1)[-1]
 
-    if not callable(ctx.execute_tool_fn):
+    if ctx.host is None:
         return OperationResult(
             output_text="OKF init failed: tool execution not injected (lisa-storage unavailable).",
         )
 
     # Detect an existing non-empty bundle via list_files (sandbox-relative).
-    existing = await list_bundle_files(ctx, bundle_path_str)
+    try:
+        existing = await list_bundle_files(ctx, bundle_path_str)
+    except (TypeError, RuntimeError) as exc:
+        return OperationResult(
+            output_text=f"OKF init failed: {exc}",
+        )
     if existing and not force:
         return OperationResult(
             output_text=(

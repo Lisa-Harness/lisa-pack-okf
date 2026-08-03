@@ -58,13 +58,13 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
     limit = int(ctx.params.get("limit", 100) or 100)
     limit = max(1, min(limit, 1000))
 
-    if not callable(ctx.execute_tool_fn):
+    if ctx.host is None:
         return OperationResult(
             output_text="OKF export memory failed: tool execution not injected.",
         )
 
     # Call memory.list to get all records
-    tool_result = await ctx.execute_tool_fn(
+    tool_result = await ctx.host.execute_tool(
         "memory.list",
         ToolExecutionContext(
             tool_id="memory.list",
@@ -176,7 +176,7 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         full_path = f"{bundle_path_str}/{concept_path}"
 
         try:
-            write_result = await ctx.execute_tool_fn(
+            write_result = await ctx.host.execute_tool(
                 "write_file",
                 ToolExecutionContext(
                     tool_id="write_file",

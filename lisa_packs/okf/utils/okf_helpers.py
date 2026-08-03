@@ -216,9 +216,9 @@ async def storage_call(
     itself throws — callers wrap broad-except around it when they want
     degradation rather than a hard failure.
     """
-    if not callable(ctx.execute_tool_fn):
+    if ctx.host is None:
         raise TypeError("tool execution not injected (lisa-storage unavailable)")
-    result = await ctx.execute_tool_fn(tool_id, _tool_ctx_from(ctx, tool_id, parameters))
+    result = await ctx.host.execute_tool(tool_id, _tool_ctx_from(ctx, tool_id, parameters))
     text = getattr(result, "output_text", "") or ""
     try:
         parsed = json.loads(text) if text else {}

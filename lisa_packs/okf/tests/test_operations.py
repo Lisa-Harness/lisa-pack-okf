@@ -30,6 +30,9 @@ from lisa_packs.okf.operations.okf import (
 
 def _ctx(params: dict, *, execute_tool_fn=None) -> object:
     """Build a minimal OperationExecutionContext stand-in for deterministic tests."""
+    from kernel.seams.host_adapter import _CallableHost
+
+    host = _CallableHost(execute_tool_fn=execute_tool_fn)
     return SimpleNamespace(
         params=params,
         workspace_id="test-ws",
@@ -38,7 +41,7 @@ def _ctx(params: dict, *, execute_tool_fn=None) -> object:
         surface_id="test-surface",
         memory_scope="personal",
         mode_id="test",
-        execute_tool_fn=execute_tool_fn,
+        host=host,
     )
 
 
@@ -198,7 +201,7 @@ def test_init_requires_storage():
     # No execute_tool_fn injected — init must fail gracefully, not raise.
     result = _run(okf_init.execute(_ctx({"bundle_path": BUNDLE, "title": "B"})))
     assert "OKF init failed" in result.output_text
-    assert "lisa-storage unavailable" in result.output_text
+    assert "not wired" in result.output_text or "lisa-storage unavailable" in result.output_text
 
 
 # ---------------------------------------------------------------------------

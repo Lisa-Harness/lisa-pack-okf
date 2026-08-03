@@ -116,7 +116,7 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
                 output_text="OKF emit failed: paths may not contain '..' segments.",
             )
 
-    if not callable(ctx.execute_tool_fn):
+    if ctx.host is None:
         return OperationResult(
             output_text="OKF emit failed: tool execution not injected (lisa-storage write_file unavailable).",
         )
@@ -163,7 +163,7 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
     if body_str:
         content += f"\n{body_str}\n"
 
-    tool_result = await ctx.execute_tool_fn(
+    tool_result = await ctx.host.execute_tool(
         "write_file",
         ToolExecutionContext(
             tool_id="write_file",
@@ -213,7 +213,7 @@ async def _find_duplicate_resource(
     itself still goes through ``write_file`` which re-validates paths).
     """
     try:
-        list_result = await ctx.execute_tool_fn(
+        list_result = await ctx.host.execute_tool(
             "list_files",
             ToolExecutionContext(
                 tool_id="list_files",
@@ -252,7 +252,7 @@ async def _find_duplicate_resource(
         if is_duplicate_concept_path(rel_path, concept_full_path):
             continue
         try:
-            read_result = await ctx.execute_tool_fn(
+            read_result = await ctx.host.execute_tool(
                 "read_file",
                 ToolExecutionContext(
                     tool_id="read_file",

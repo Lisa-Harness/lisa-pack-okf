@@ -176,7 +176,7 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
             output_text="OKF briefing failed: bundle_path may not contain '..' segments.",
         )
 
-    if not callable(ctx.execute_tool_fn):
+    if ctx.host is None:
         # No storage available (e.g. bare host) → empty briefing, not a
         # hard failure. A missing briefing is a no-op for the turn; a
         # hard failure would break the host's pre-turn pipeline.
@@ -190,7 +190,19 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
             },
         )
 
-    files = await list_bundle_files(ctx, bundle_path_str)
+    try:
+        files = await list_bundle_files(ctx, bundle_path_str)
+    except (TypeError, RuntimeError) as exc:
+        # Storage not wired or unavailable — empty briefing, not a hard failure.
+        logger.debug("okf_briefing: storage unavailable (%s); returning empty briefing", exc)
+        return OperationResult(
+            output_text="",
+            output_json={
+                "output_text": "",
+                "surfaced_concepts": [],
+                "bundle_path": bundle_path_str,
+            },
+        )
 
     concepts: list[dict[str, object]] = []
     for sandbox_path in files:

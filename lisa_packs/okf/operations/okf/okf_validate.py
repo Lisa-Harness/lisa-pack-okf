@@ -168,7 +168,7 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
             output_text="OKF validation failed: bundle_path may not contain '..' segments.",
         )
 
-    if not callable(ctx.execute_tool_fn):
+    if ctx.host is None:
         return OperationResult(
             output_text="OKF validation failed: tool execution not injected (lisa-storage unavailable).",
         )
