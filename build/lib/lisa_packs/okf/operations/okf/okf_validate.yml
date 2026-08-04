@@ -1,9 +1,0 @@
-type: Lisa Operation
-title: OKF Validate
-description: Validate a bundle for OKF v0.2 conformance via lisa-storage (list_files + read_file). Checks that every non-reserved .md file has parseable YAML frontmatter with a non-empty `type` field. Returns a conformance report with any violations found. bundle_path is a sandbox-relative path (e.g. 'okf/my-bundle').
-tags: [okf, validation, conformance]
-status: stable
-generated: { by: human:adam, at: 2026-07-25T00:00:00Z }
-operation_id: okf_validate
-exportable: true
-default_available: true
