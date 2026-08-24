@@ -5,4 +5,5 @@ tags: [okf, validation, conformance]
 status: stable
 generated: { by: human:adam, at: 2026-07-25T00:00:00Z }
 operation_id: okf_validate
+effect: read
 exportable: true
