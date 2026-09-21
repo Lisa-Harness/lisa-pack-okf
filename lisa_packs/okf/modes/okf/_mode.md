@@ -12,6 +12,9 @@ mode_kind: chat
 require_query: true
 routable: true
 priority: 8
+fast_path_patterns:
+  - "\\bokf\\b"
+  - "\\bopen knowledge format\\b"
 pre_turn_operation_ids: [okf_briefing]
 routing_intent_tags: [okf]
 satisfies_intents: [okf]
@@ -64,7 +67,7 @@ Concept I/O:
 
 Working memory:
 
-- `okf_briefing` — deterministic pre-turn skim of the working bundle (`okf/working` by default). Surfaces non-stale `stable` concepts whose `type`/`title`/`description`/`tags` overlap the user's query as a compact cited bullet list, or empty when nothing is relevant. Wired as a `pre_turn_operation_ids` entry on this mode (and on `markdown`), so the model gets a bounded advisory block of relevant concepts before the main turn — a skim, not a dump. Call `read_file` on a cited path for the full text.
+- `okf_briefing` — deterministic pre-turn skim of the working bundle (`okf/working` by default). Surfaces non-stale `stable` concepts whose `type`/`title`/`description`/`tags` overlap the user's query as a compact cited bullet list, or empty when nothing is relevant. Wired as a `pre_turn_operation_ids` entry on this mode, so the model gets a bounded advisory block of relevant concepts before the main turn — a skim, not a dump. Call `read_file` on a cited path for the full text.
 
 ## OKF v0.2 quick reference
 
