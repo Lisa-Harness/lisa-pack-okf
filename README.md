@@ -1,6 +1,6 @@
 # lisa-pack-okf
 
-Open Knowledge Format (OKF) v0.2 pack for [Lisa](https://github.com/Lisa-Framework/lisa).
+Open Knowledge Format (OKF) v0.2 pack for [Lisa](https://github.com/Lisa-Harness/lisa).
 Initialize, validate, ingest, emit, reindex, log, and export OKF bundles —
 the vendor-neutral standard for representing knowledge as a directory of
 markdown files with YAML frontmatter.
@@ -92,7 +92,7 @@ Step-by-step body content in markdown.
 ## Installation
 
 This pack is a git submodule of
-[`lisa-packs`](https://github.com/Lisa-Framework/lisa-packs) and is consumed
+[`lisa-packs`](https://github.com/Lisa-Harness/lisa-packs) and is consumed
 as a path dependency by `../lisa/pyproject.toml`. Install it editable from
 a checkout with submodules initialized:
 
@@ -343,7 +343,7 @@ okf/
 
 This pack is a submodule of `lisa-packs`. Work inside the `okf/` directory,
 commit on a branch of the pack's own repo, push to
-`Lisa-Framework/lisa-pack-okf`, open a PR, then bump the submodule pointer in
+`Lisa-Harness/lisa-pack-okf`, open a PR, then bump the submodule pointer in
 `lisa-packs`. See
-[`docs/SUBMODULE_GUIDE.md`](https://github.com/Lisa-Framework/lisa-packs/blob/main/docs/SUBMODULE_GUIDE.md)
+[`docs/SUBMODULE_GUIDE.md`](https://github.com/Lisa-Harness/lisa-packs/blob/main/docs/SUBMODULE_GUIDE.md)
 in the parent repo for the full workflow.
