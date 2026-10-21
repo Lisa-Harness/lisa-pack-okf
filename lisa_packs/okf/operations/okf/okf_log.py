@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import logging
 
+from kernel.models import OperationExecutionContext, OperationResult
 from pydantic import BaseModel, Field
 
-from kernel.models import OperationExecutionContext, OperationResult
 from lisa_packs.okf.utils.okf_helpers import append_log_entry_storage, build_log_entry
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,8 @@ class Parameters(BaseModel):
 
     bundle_path: str = Field(
         ...,
-        description="Relative path within the lisa-storage files sandbox for the OKF bundle whose log.md should be appended to.",
+        description="Relative path within the lisa-storage files sandbox for the OKF "
+        "bundle whose log.md should be appended to.",
     )
     action: str = Field(
         ...,
@@ -45,7 +46,8 @@ class Parameters(BaseModel):
     )
     by: str = Field(
         default="",
-        description="Actor string for the log entry (e.g. 'human:adam'). Defaults to lisa-pack-okf/0.1.0.",
+        description="Actor string for the log entry (e.g. 'human:adam'). "
+        "Defaults to lisa-pack-okf/0.1.0.",
     )
     note: str = Field(
         default="",
@@ -90,8 +92,5 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         )
 
     return OperationResult(
-        output_text=(
-            f"OKF log entry appended: {bundle_path_str}/log.md\n"
-            f"  {entry}"
-        ),
+        output_text=(f"OKF log entry appended: {bundle_path_str}/log.md\n  {entry}"),
     )

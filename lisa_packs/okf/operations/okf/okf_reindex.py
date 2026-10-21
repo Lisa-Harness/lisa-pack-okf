@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import logging
 
+from kernel.models import OperationExecutionContext, OperationResult
 from pydantic import BaseModel, Field
 
-from kernel.models import OperationExecutionContext, OperationResult
 from lisa_packs.okf.utils.okf_helpers import (
     RESERVED_FILENAMES,
     append_log_entry_storage,
@@ -37,11 +37,13 @@ class Parameters(BaseModel):
 
     bundle_path: str = Field(
         ...,
-        description="Relative path within the lisa-storage files sandbox for the OKF bundle directory to reindex.",
+        description="Relative path within the lisa-storage files sandbox for the OKF "
+        "bundle directory to reindex.",
     )
     title: str = Field(
         default="",
-        description="Override title for index.md. If empty, keeps the existing index title or uses the bundle name.",
+        description="Override title for index.md. If empty, keeps the existing "
+        "index title or uses the bundle name.",
     )
 
 
@@ -50,41 +52,35 @@ def _strip_bundle_prefix(sandbox_path: str, bundle_path_str: str) -> str:
     p = sandbox_path.replace("\\", "/")
     prefix = bundle_path_str.replace("\\", "/").strip("/")
     if prefix and p.startswith(prefix + "/"):
-        return p[len(prefix) + 1:]
+        return p[len(prefix) + 1 :]
     return p
 
 
-async def execute(ctx: OperationExecutionContext) -> OperationResult:
-    """Regenerate ``index.md`` for an OKF bundle from its current concepts."""
-    bundle_path_str = str(ctx.params.get("bundle_path", "")).strip().strip("/")
-    if not bundle_path_str:
-        return OperationResult(output_text="OKF reindex failed: bundle_path is required.")
-
-    title_override = str(ctx.params.get("title", "")).strip()
-    bundle_name = bundle_path_str.rsplit("/", 1)[-1]
-
-    if ".." in bundle_path_str.replace("\\", "/").split("/"):
-        return OperationResult(
-            output_text="OKF reindex failed: bundle_path may not contain '..' segments.",
-        )
-
-    if ctx.host is None:
-        return OperationResult(
-            output_text="OKF reindex failed: tool execution not injected (lisa-storage unavailable).",
-        )
-
+async def _resolve_title(
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+    title_override: str,
+    bundle_name: str,
+) -> str:
+    """Resolve the index title: override, else existing index title, else bundle name."""
+    if title_override:
+        return title_override
     # Preserve the existing index title if present and no override given.
-    existing_title = ""
-    if not title_override:
-        existing_index = await read_bundle_file(ctx, bundle_path_str, "index.md")
-        if existing_index:
-            fm = parse_frontmatter(existing_index)
-            if fm:
-                existing_title = str(fm.get("title", "") or "")
+    existing_index = await read_bundle_file(ctx, bundle_path_str, "index.md")
+    if existing_index:
+        fm = parse_frontmatter(existing_index)
+        if fm:
+            existing_title = str(fm.get("title", "") or "")
+            if existing_title:
+                return existing_title
+    return bundle_name
 
-    title = title_override or existing_title or bundle_name
 
-    # Walk the bundle via lisa-storage list_files + read_file.
+async def _collect_concepts(
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+) -> list[dict[str, object]]:
+    """Walk the bundle via lisa-storage list_files + read_file and index its concepts."""
     files = await list_bundle_files(ctx, bundle_path_str)
     concepts: list[dict[str, object]] = []
     for sandbox_path in files:
@@ -110,6 +106,32 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
                 "description": str(fm.get("description", "") or ""),
             }
         )
+    return concepts
+
+
+async def execute(ctx: OperationExecutionContext) -> OperationResult:
+    """Regenerate ``index.md`` for an OKF bundle from its current concepts."""
+    bundle_path_str = str(ctx.params.get("bundle_path", "")).strip().strip("/")
+    if not bundle_path_str:
+        return OperationResult(output_text="OKF reindex failed: bundle_path is required.")
+
+    title_override = str(ctx.params.get("title", "")).strip()
+    bundle_name = bundle_path_str.rsplit("/", 1)[-1]
+
+    if ".." in bundle_path_str.replace("\\", "/").split("/"):
+        return OperationResult(
+            output_text="OKF reindex failed: bundle_path may not contain '..' segments.",
+        )
+
+    if ctx.host is None:
+        return OperationResult(
+            output_text=(
+                "OKF reindex failed: tool execution not injected (lisa-storage unavailable)."
+            ),
+        )
+
+    title = await _resolve_title(ctx, bundle_path_str, title_override, bundle_name)
+    concepts = await _collect_concepts(ctx, bundle_path_str)
 
     index_fm = format_okf_frontmatter(
         concept_type="OKF Bundle Index",

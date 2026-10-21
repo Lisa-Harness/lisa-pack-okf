@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import logging
 
+from kernel.models import OperationExecutionContext, OperationResult
 from pydantic import BaseModel, Field
 
-from kernel.models import OperationExecutionContext, OperationResult
 from lisa_packs.okf.utils.okf_helpers import (
     RESERVED_FILENAMES,
     list_bundle_files,
@@ -23,20 +23,23 @@ from lisa_packs.okf.utils.okf_helpers import (
 
 logger = logging.getLogger(__name__)
 
+#: Number of leading characters of a concept body kept in the structured
+#: output when body truncation is enabled.
+_BODY_PREVIEW_CHARS = 2000
+
 
 class Parameters(BaseModel):
     """User-supplied inputs for the OKF ingest operation."""
 
     bundle_path: str = Field(
         ...,
-        description="Relative path within the lisa-storage files sandbox for the OKF bundle directory to ingest.",
+        description="Relative path within the lisa-storage files sandbox for the OKF "
+        "bundle directory to ingest.",
     )
     truncate_body: bool = Field(
         default=True,
-        description=(
-            "If True (default), truncate each concept body to 2000 chars in the "
-            "structured output. Set False to receive the full body text."
-        ),
+        description="If True (default), truncate each concept body to 2000 chars in the "
+        "structured output. Set False to receive the full body text.",
     )
 
 
@@ -49,7 +52,9 @@ class OkfConcept(BaseModel):
     description: str = Field(default="", description="One-line summary.")
     resource: str = Field(default="", description="Canonical URI for the underlying asset.")
     tags: list[str] = Field(default_factory=list, description="Categorization tags.")
-    status: str = Field(default="stable", description="Lifecycle status: draft, stable, or deprecated.")
+    status: str = Field(
+        default="stable", description="Lifecycle status: draft, stable, or deprecated."
+    )
     generated_by: str = Field(default="", description="Actor who produced the content.")
     generated_at: str = Field(default="", description="ISO 8601 timestamp of generation.")
     body: str = Field(default="", description="Markdown body content (first 2000 chars).")
@@ -59,7 +64,9 @@ class OkfBundle(BaseModel):
     """A complete OKF bundle ingested from the storage sandbox."""
 
     bundle_path: str = Field(..., description="The bundle directory path.")
-    concepts: list[OkfConcept] = Field(default_factory=list, description="All concept documents in the bundle.")
+    concepts: list[OkfConcept] = Field(
+        default_factory=list, description="All concept documents in the bundle."
+    )
 
 
 def _extract_body(text: str) -> str:
@@ -72,10 +79,10 @@ def _extract_body(text: str) -> str:
         return text.strip()
 
     # Find the end of the closing --- line
-    after_close = text[end_idx + 3:]
+    after_close = text[end_idx + 3 :]
     next_newline = after_close.find("\n")
     if next_newline != -1:
-        return after_close[next_newline + 1:].strip()
+        return after_close[next_newline + 1 :].strip()
     return after_close.strip()
 
 
@@ -111,30 +118,55 @@ def _strip_bundle_prefix(sandbox_path: str, bundle_path_str: str) -> str:
     p = sandbox_path.replace("\\", "/")
     prefix = bundle_path_str.replace("\\", "/").strip("/")
     if prefix and p.startswith(prefix + "/"):
-        return p[len(prefix) + 1:]
+        return p[len(prefix) + 1 :]
     return p
 
 
-async def execute(ctx: OperationExecutionContext) -> OperationResult:
-    """Ingest an OKF v0.2 bundle and return its concepts as structured data."""
-    bundle_path_str = str(ctx.params.get("bundle_path", "")).strip().strip("/")
-    if not bundle_path_str:
-        return OperationResult(
-            output_text="OKF ingest failed: bundle_path is required.",
-        )
+def _frontmatter_tags(frontmatter: dict[str, object]) -> list[str]:
+    """Extract the ``tags`` list from a frontmatter block."""
+    tags_val = frontmatter.get("tags")
+    if not isinstance(tags_val, list):
+        return []
+    return [str(t) for t in tags_val if t is not None]
 
-    if ".." in bundle_path_str.replace("\\", "/").split("/"):
-        return OperationResult(
-            output_text="OKF ingest failed: bundle_path may not contain '..' segments.",
-        )
 
-    if ctx.host is None:
-        return OperationResult(
-            output_text="OKF ingest failed: tool execution not injected (lisa-storage unavailable).",
-        )
+def _build_concept(
+    rel_path: str,
+    text: str,
+    frontmatter: dict[str, object],
+    *,
+    truncate: bool,
+) -> OkfConcept:
+    """Build one concept document from its file text and frontmatter."""
+    body = _extract_body(text)
+    # Truncation is opt-in via the ``truncate_body`` parameter so that
+    # callers who want the full text (e.g. a backend reading concepts)
+    # get it. Default remains 2000 for backwards compatibility with
+    # chat-mode summaries where token budget matters.
+    body_preview = body[:_BODY_PREVIEW_CHARS] if truncate else body
+    generated_by, generated_at = _generated_info(frontmatter)
+    return OkfConcept(
+        path=rel_path,
+        type=_str_value(frontmatter, "type"),
+        title=_str_value(frontmatter, "title"),
+        description=_str_value(frontmatter, "description"),
+        resource=_str_value(frontmatter, "resource"),
+        tags=_frontmatter_tags(frontmatter),
+        status=_str_value(frontmatter, "status") or "stable",
+        generated_by=generated_by,
+        generated_at=generated_at,
+        body=body_preview,
+    )
 
+
+async def _ingest_concepts(
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+    *,
+    truncate: bool,
+) -> list[OkfConcept]:
+    """Read a bundle and return every concept document it contains."""
     files = await list_bundle_files(ctx, bundle_path_str)
-
     concepts: list[OkfConcept] = []
 
     for sandbox_path in files:
@@ -156,44 +188,15 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         if not type_val:
             continue
 
-        body = _extract_body(text)
-        # Truncation is opt-in via the ``truncate_body`` parameter so that
-        # callers who want the full text (e.g. a backend reading concepts)
-        # get it. Default remains 2000 for backwards compatibility with
-        # chat-mode summaries where token budget matters.
-        truncate = ctx.params.get("truncate_body", True)
-        body_preview = body[:2000] if truncate else body
-
-        generated_by, generated_at = _generated_info(frontmatter)
-
-        tags_val = frontmatter.get("tags")
-        tags: list[str] = []
-        if isinstance(tags_val, list):
-            tags = [str(t) for t in tags_val if t is not None]
-
         concepts.append(
-            OkfConcept(
-                path=rel_path,
-                type=type_val,
-                title=_str_value(frontmatter, "title"),
-                description=_str_value(frontmatter, "description"),
-                resource=_str_value(frontmatter, "resource"),
-                tags=tags,
-                status=_str_value(frontmatter, "status") or "stable",
-                generated_by=generated_by,
-                generated_at=generated_at,
-                body=body_preview,
-            )
+            _build_concept(rel_path, text, frontmatter, truncate=truncate),
         )
 
-    bundle_data = OkfBundle(bundle_path=bundle_path_str, concepts=concepts)
+    return concepts
 
-    if not concepts:
-        return OperationResult(
-            output_text=f"OKF ingest: no concepts found in {bundle_path_str}",
-            output_json=bundle_data.model_dump(),
-        )
 
+def _summarize(concepts: list[OkfConcept], bundle_path_str: str) -> str:
+    """Build the human-readable ingest summary."""
     type_counts: dict[str, int] = {}
     for c in concepts:
         type_counts[c.type] = type_counts.get(c.type, 0) + 1
@@ -206,8 +209,41 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
     ]
     for t, count in sorted(type_counts.items()):
         summary_lines.append(f"  {t}: {count}")
+    return "\n".join(summary_lines)
+
+
+async def execute(ctx: OperationExecutionContext) -> OperationResult:
+    """Ingest an OKF v0.2 bundle and return its concepts as structured data."""
+    bundle_path_str = str(ctx.params.get("bundle_path", "")).strip().strip("/")
+    if not bundle_path_str:
+        return OperationResult(
+            output_text="OKF ingest failed: bundle_path is required.",
+        )
+
+    if ".." in bundle_path_str.replace("\\", "/").split("/"):
+        return OperationResult(
+            output_text="OKF ingest failed: bundle_path may not contain '..' segments.",
+        )
+
+    if ctx.host is None:
+        return OperationResult(
+            output_text=(
+                "OKF ingest failed: tool execution not injected (lisa-storage unavailable)."
+            ),
+        )
+
+    truncate = bool(ctx.params.get("truncate_body", True))
+    concepts = await _ingest_concepts(ctx, bundle_path_str, truncate=truncate)
+
+    bundle_data = OkfBundle(bundle_path=bundle_path_str, concepts=concepts)
+
+    if not concepts:
+        return OperationResult(
+            output_text=f"OKF ingest: no concepts found in {bundle_path_str}",
+            output_json=bundle_data.model_dump(),
+        )
 
     return OperationResult(
-        output_text="\n".join(summary_lines),
+        output_text=_summarize(concepts, bundle_path_str),
         output_json=bundle_data.model_dump(),
     )

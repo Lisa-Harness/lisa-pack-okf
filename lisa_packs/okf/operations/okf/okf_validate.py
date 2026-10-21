@@ -13,9 +13,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from kernel.models import OperationExecutionContext, OperationResult
 from pydantic import BaseModel, Field
 
-from kernel.models import OperationExecutionContext, OperationResult
 from lisa_packs.okf.utils.okf_helpers import (
     RESERVED_FILENAMES,
     extract_resource,
@@ -26,12 +26,14 @@ from lisa_packs.okf.utils.okf_helpers import (
 
 logger = logging.getLogger(__name__)
 
+
 class Parameters(BaseModel):
     """User-supplied inputs for the OKF validate operation."""
 
     bundle_path: str = Field(
         ...,
-        description="Relative path within the lisa-storage files sandbox for the OKF bundle directory to validate.",
+        description="Relative path within the lisa-storage files sandbox for the OKF "
+        "bundle directory to validate.",
     )
     strict: bool = Field(
         default=False,
@@ -58,41 +60,62 @@ def _check_strict(frontmatter: dict[str, object]) -> list[str]:
     These are SHOULD-level checks beyond the MUST-level ``type`` requirement.
     """
     out: list[str] = []
+    out.extend(_check_strict_status(frontmatter))
+    out.extend(_check_strict_stale_after(frontmatter))
+    out.extend(_check_strict_generated(frontmatter))
+    out.extend(_check_strict_sources(frontmatter))
+    return out
 
+
+def _check_strict_status(frontmatter: dict[str, object]) -> list[str]:
+    """Check the ``status`` enum in strict mode."""
     status = frontmatter.get("status")
     if status is not None and str(status) not in _VALID_STATUSES:
-        out.append(
-            f"`status` must be one of {sorted(_VALID_STATUSES)}; got '{status}'."
-        )
+        return [f"`status` must be one of {sorted(_VALID_STATUSES)}; got '{status}'."]
+    return []
 
+
+def _check_strict_stale_after(frontmatter: dict[str, object]) -> list[str]:
+    """Check the ``stale_after`` date format in strict mode."""
     stale_after = frontmatter.get("stale_after")
-    if stale_after is not None:
-        sa = str(stale_after)
-        try:
-            datetime.strptime(sa, "%Y-%m-%d")
-        except ValueError:
-            out.append(f"`stale_after` must be YYYY-MM-DD; got '{sa}'.")
+    if stale_after is None:
+        return []
+    sa = str(stale_after)
+    try:
+        datetime.strptime(sa, "%Y-%m-%d")
+    except ValueError:
+        return [f"`stale_after` must be YYYY-MM-DD; got '{sa}'."]
+    return []
 
+
+def _check_strict_generated(frontmatter: dict[str, object]) -> list[str]:
+    """Check the ``generated`` mapping shape in strict mode."""
     generated = frontmatter.get("generated")
     if isinstance(generated, dict):
         at = generated.get("at")
         if not at or not str(at).strip():
-            out.append("`generated.at` is missing or empty.")
-    elif generated is not None:
-        out.append("`generated` must be a mapping with `by` and `at` keys.")
+            return ["`generated.at` is missing or empty."]
+        return []
+    if generated is not None:
+        return ["`generated` must be a mapping with `by` and `at` keys."]
+    return []
 
+
+def _check_strict_sources(frontmatter: dict[str, object]) -> list[str]:
+    """Check the ``sources`` list shape in strict mode."""
     sources = frontmatter.get("sources")
-    if isinstance(sources, list):
-        for i, src in enumerate(sources):
-            if not isinstance(src, dict):
-                out.append(f"`sources[{i}]` must be a mapping.")
-                continue
-            resource = src.get("resource")
-            if not resource or not str(resource).strip():
-                out.append(f"`sources[{i}].resource` is missing or empty.")
-    elif sources is not None:
-        out.append("`sources` must be a list of mappings.")
-
+    if not isinstance(sources, list):
+        if sources is not None:
+            return ["`sources` must be a list of mappings."]
+        return []
+    out: list[str] = []
+    for i, src in enumerate(sources):
+        if not isinstance(src, dict):
+            out.append(f"`sources[{i}]` must be a mapping.")
+            continue
+        resource = src.get("resource")
+        if not resource or not str(resource).strip():
+            out.append(f"`sources[{i}].resource` is missing or empty.")
     return out
 
 
@@ -106,9 +129,8 @@ def _check_reserved_structure(text: str, kind: str) -> list[str]:
             out.append("index.md is missing YAML frontmatter.")
         elif "# Bundle Index" not in text and "# " not in text:
             out.append("index.md body does not look like a bundle listing.")
-    elif kind == "log.md":
-        if not text.lstrip().startswith("#") and not text.startswith("-"):
-            out.append("log.md does not start with a heading or an entry line.")
+    elif kind == "log.md" and not text.lstrip().startswith("#") and not text.startswith("-"):
+        out.append("log.md does not start with a heading or an entry line.")
     return out
 
 
@@ -123,7 +145,9 @@ class OkfConformanceReport(BaseModel):
     """Structured conformance report for an OKF bundle."""
 
     bundle_path: str = Field(..., description="The validated bundle directory path.")
-    conformant: bool = Field(..., description="True if the bundle passes all OKF v0.2 conformance checks.")
+    conformant: bool = Field(
+        ..., description="True if the bundle passes all OKF v0.2 conformance checks."
+    )
     total_concepts: int = Field(0, description="Number of concept documents found.")
     violations: list[ConceptViolation] = Field(
         default_factory=list,
@@ -136,53 +160,28 @@ def _strip_bundle_prefix(sandbox_path: str, bundle_path_str: str) -> str:
     p = sandbox_path.replace("\\", "/")
     prefix = bundle_path_str.replace("\\", "/").strip("/")
     if prefix and p.startswith(prefix + "/"):
-        return p[len(prefix) + 1:]
+        return p[len(prefix) + 1 :]
     return p
 
 
-async def execute(ctx: OperationExecutionContext) -> OperationResult:
-    """Validate an OKF v0.2 bundle directory for conformance.
+async def _scan_bundle(
+    ctx: OperationExecutionContext,
+    bundle_path_str: str,
+    *,
+    strict: bool,
+) -> tuple[list[ConceptViolation], list[ConceptViolation], int, dict[str, str]]:
+    """Walk a bundle and collect its conformance violations.
 
-    OKF v0.2 conformance (§11 of the spec) requires:
-    1. Every non-reserved .md file contains parseable YAML frontmatter.
-    2. Every frontmatter block contains a non-empty ``type`` field.
-    3. Reserved filenames (index.md, log.md) follow their structure when present
-       (checked as a soft warning — consumers MUST NOT reject for missing index.md).
-
-    When ``strict`` is True, additionally checks SHOULD-level fields:
-    ``status`` enum, ``stale_after`` date format, ``generated.at`` presence,
-    and ``sources[].resource`` shape. Strict violations are reported separately
-    and only affect ``conformant`` if ``include_strict`` is True.
+    Returns ``(violations, strict_violations, total_concepts, file_texts)``.
+    Reserved filenames are exempt from the type-field requirement but get
+    a soft structural check in strict mode.
     """
-    bundle_path_str = str(ctx.params.get("bundle_path", "")).strip().strip("/")
-    if not bundle_path_str:
-        return OperationResult(
-            output_text="OKF validation failed: bundle_path is required.",
-        )
-
-    strict = bool(ctx.params.get("strict", False))
-    include_strict = bool(ctx.params.get("include_strict", False))
-
-    if ".." in bundle_path_str.replace("\\", "/").split("/"):
-        return OperationResult(
-            output_text="OKF validation failed: bundle_path may not contain '..' segments.",
-        )
-
-    if ctx.host is None:
-        return OperationResult(
-            output_text="OKF validation failed: tool execution not injected (lisa-storage unavailable).",
-        )
-
     files = await list_bundle_files(ctx, bundle_path_str)
-
     violations: list[ConceptViolation] = []
     strict_violations: list[ConceptViolation] = []
     total_concepts = 0
-
-    # First pass: per-file conformance + strict field checks. Read each
-    # file once via lisa-storage; reserved filenames are exempt from the
-    # type-field requirement but get a soft structural check in strict.
     file_texts: dict[str, str] = {}
+
     for sandbox_path in files:
         rel_path = _strip_bundle_prefix(sandbox_path, bundle_path_str)
         if not rel_path.endswith(".md"):
@@ -227,39 +226,114 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
             for sv in _check_strict(frontmatter):
                 strict_violations.append(ConceptViolation(path=rel_path, violation=sv))
 
-    # Strict-mode duplicate-resource scan (2026-07-28): ``resource`` is the
-    # OKF concept identity key. A bundle with two concepts sharing one
-    # ``resource`` is non-conformant in strict mode — the duplicate
-    # silently accumulates otherwise (emit refuses cross-path dupes, but
-    # other producers or hand-edits can still create them). Reported as a
-    # strict violation on every copy after the first. Reuses the texts
-    # already fetched in the first pass (no second storage round-trip).
-    if strict:
-        seen_resources: dict[str, str] = {}
-        for rel_path in sorted(file_texts):
-            filename = rel_path.rsplit("/", 1)[-1]
-            if filename in RESERVED_FILENAMES:
-                continue
-            frontmatter = parse_frontmatter(file_texts[rel_path])
-            if frontmatter is None:
-                continue
-            resource = extract_resource(frontmatter)
-            if not resource:
-                continue
-            prior = seen_resources.get(resource)
-            if prior is not None:
-                strict_violations.append(
-                    ConceptViolation(
-                        path=rel_path,
-                        violation=(
-                            f"Duplicate 'resource' '{resource}' — already declared at "
-                            f"'{prior}'. resource is the concept identity key; a bundle "
-                            f"must have at most one concept per resource."
-                        ),
-                    )
+    return violations, strict_violations, total_concepts, file_texts
+
+
+def _duplicate_resource_violations(file_texts: dict[str, str]) -> list[ConceptViolation]:
+    """Return strict-mode violations for concepts sharing one ``resource``.
+
+    ``resource`` is the OKF concept identity key. A bundle with two
+    concepts sharing one ``resource`` is non-conformant in strict mode —
+    the duplicate silently accumulates otherwise (emit refuses cross-path
+    dupes, but other producers or hand-edits can still create them).
+    Reported as a strict violation on every copy after the first. Reuses
+    the texts already fetched in the first pass (no second storage
+    round-trip).
+    """
+    out: list[ConceptViolation] = []
+    seen_resources: dict[str, str] = {}
+    for rel_path in sorted(file_texts):
+        filename = rel_path.rsplit("/", 1)[-1]
+        if filename in RESERVED_FILENAMES:
+            continue
+        frontmatter = parse_frontmatter(file_texts[rel_path])
+        if frontmatter is None:
+            continue
+        resource = extract_resource(frontmatter)
+        if not resource:
+            continue
+        prior = seen_resources.get(resource)
+        if prior is not None:
+            out.append(
+                ConceptViolation(
+                    path=rel_path,
+                    violation=(
+                        f"Duplicate 'resource' '{resource}' — already declared at "
+                        f"'{prior}'. resource is the concept identity key; a bundle "
+                        f"must have at most one concept per resource."
+                    ),
                 )
-            else:
-                seen_resources[resource] = rel_path
+            )
+        else:
+            seen_resources[resource] = rel_path
+    return out
+
+
+def _render_report(
+    report: OkfConformanceReport,
+    violations: list[ConceptViolation],
+) -> str:
+    """Render the human-readable conformance summary."""
+    if report.conformant:
+        return (
+            f"OKF v0.2 conformance: PASSED\n"
+            f"Bundle: {report.bundle_path}\n"
+            f"Concepts: {report.total_concepts}\n"
+            f"Violations: 0"
+        )
+    lines = [
+        "OKF v0.2 conformance: FAILED",
+        f"Bundle: {report.bundle_path}",
+        f"Concepts: {report.total_concepts}",
+        f"Violations: {len(violations)}",
+        "",
+    ]
+    for v in violations:
+        lines.append(f"  - {v.path}: {v.violation}")
+    return "\n".join(lines)
+
+
+async def execute(ctx: OperationExecutionContext) -> OperationResult:
+    """Validate an OKF v0.2 bundle directory for conformance.
+
+    OKF v0.2 conformance (§11 of the spec) requires:
+    1. Every non-reserved .md file contains parseable YAML frontmatter.
+    2. Every frontmatter block contains a non-empty ``type`` field.
+    3. Reserved filenames (index.md, log.md) follow their structure when present
+       (checked as a soft warning — consumers MUST NOT reject for missing index.md).
+
+    When ``strict`` is True, additionally checks SHOULD-level fields:
+    ``status`` enum, ``stale_after`` date format, ``generated.at`` presence,
+    and ``sources[].resource`` shape. Strict violations are reported separately
+    and only affect ``conformant`` if ``include_strict`` is True.
+    """
+    bundle_path_str = str(ctx.params.get("bundle_path", "")).strip().strip("/")
+    if not bundle_path_str:
+        return OperationResult(
+            output_text="OKF validation failed: bundle_path is required.",
+        )
+
+    strict = bool(ctx.params.get("strict", False))
+    include_strict = bool(ctx.params.get("include_strict", False))
+
+    if ".." in bundle_path_str.replace("\\", "/").split("/"):
+        return OperationResult(
+            output_text="OKF validation failed: bundle_path may not contain '..' segments.",
+        )
+
+    if ctx.host is None:
+        return OperationResult(
+            output_text=(
+                "OKF validation failed: tool execution not injected (lisa-storage unavailable)."
+            ),
+        )
+
+    violations, strict_violations, total_concepts, file_texts = await _scan_bundle(
+        ctx, bundle_path_str, strict=strict
+    )
+
+    if strict:
+        strict_violations.extend(_duplicate_resource_violations(file_texts))
 
     all_violations = violations + strict_violations
     conformant = len(violations) == 0 and (not include_strict or len(strict_violations) == 0)
@@ -271,26 +345,7 @@ async def execute(ctx: OperationExecutionContext) -> OperationResult:
         violations=all_violations,
     )
 
-    if report.conformant:
-        output = (
-            f"OKF v0.2 conformance: PASSED\n"
-            f"Bundle: {bundle_path_str}\n"
-            f"Concepts: {total_concepts}\n"
-            f"Violations: 0"
-        )
-    else:
-        lines = [
-            "OKF v0.2 conformance: FAILED",
-            f"Bundle: {bundle_path_str}",
-            f"Concepts: {total_concepts}",
-            f"Violations: {len(violations)}",
-            "",
-        ]
-        for v in violations:
-            lines.append(f"  - {v.path}: {v.violation}")
-        output = "\n".join(lines)
-
     return OperationResult(
-        output_text=output,
+        output_text=_render_report(report, violations),
         output_json=report.model_dump(),
     )
