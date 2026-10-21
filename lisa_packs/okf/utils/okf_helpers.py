@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,16 @@ if TYPE_CHECKING:
     from kernel.models import OperationExecutionContext, ToolExecutionContext
 
 logger = logging.getLogger(__name__)
+
+#: Minimum length of a query token for it to count toward relevance.
+#: Shorter tokens ("a", "I", "to") match far too much prose to be
+#: informative, so they are dropped before scoring.
+_MIN_QUERY_TOKEN_CHARS = 3
+
+#: Character length of an ISO ``YYYY-MM-DD`` date string. A value of a
+#: different length cannot be a date, so it is treated as "not stale"
+#: rather than guessed at.
+_ISO_DATE_CHARS = 10
 
 
 def format_okf_frontmatter(
@@ -87,8 +98,6 @@ def sanitize_filename(name: str) -> str:
     Replaces spaces and special characters with hyphens, collapses
     runs, and strips leading/trailing separators.
     """
-    import re
-
     safe = re.sub(r"[^a-z0-9]+", "-", name.lower())
     safe = safe.strip("-")
     return safe or "untitled"
@@ -385,6 +394,7 @@ def is_duplicate_concept_path(candidate: str, existing: str) -> bool:
     Path comparison is case-insensitive and slash-agnostic (``\\`` vs ``/``)
     so a Windows caller and a Unix-written bundle agree on identity.
     """
+
     def _norm(p: str) -> str:
         return p.strip().replace("\\", "/").lstrip("/").lower()
 
@@ -407,7 +417,7 @@ def _stale_after_is_past(stale_after: str, *, today: str | None = None) -> bool:
     if not stale_after:
         return False
     sa = str(stale_after).strip()
-    if len(sa) != 10 or sa[4] != "-" or sa[7] != "-":
+    if len(sa) != _ISO_DATE_CHARS or sa[4] != "-" or sa[7] != "-":
         return False  # malformed → treat as not stale (don't drop on a guess)
     ref = today or datetime.now(UTC).strftime("%Y-%m-%d")
     return sa < ref
@@ -443,9 +453,7 @@ def score_concept_relevance(
         return 0
 
     # Tokenize on non-alphanumeric runs; drop very short tokens.
-    import re
-
-    query_tokens = {t for t in re.split(r"[^a-z0-9]+", q) if len(t) >= 3}
+    query_tokens = {t for t in re.split(r"[^a-z0-9]+", q) if len(t) >= _MIN_QUERY_TOKEN_CHARS}
     if not query_tokens:
         return 0
 
@@ -466,12 +474,24 @@ def score_concept_relevance(
     # mode's focus gets a small boost even if the query tokens don't
     # overlap, because it is likely useful background for that mode.
     if mode_intent_tags:
-        mode_tags_lower = {t.lower() for t in mode_intent_tags}
-        if isinstance(tags_val, list):
-            if any(str(t).lower() in mode_tags_lower for t in tags_val):
-                score += 1
+        score += _mode_intent_tag_bonus(tags_val, mode_intent_tags)
 
     return score
+
+
+def _mode_intent_tag_bonus(tags_val: object, mode_intent_tags: list[str]) -> int:
+    """Return the mode-intent tag overlap bonus for one concept.
+
+    A concept tagged for the active mode's focus gets a small boost even
+    when the query tokens do not overlap, because it is likely useful
+    background for that mode.
+    """
+    if not mode_intent_tags or not isinstance(tags_val, list):
+        return 0
+    mode_tags_lower = {t.lower() for t in mode_intent_tags}
+    if any(str(t).lower() in mode_tags_lower for t in tags_val):
+        return 1
+    return 0
 
 
 def filter_briefing_concepts(
