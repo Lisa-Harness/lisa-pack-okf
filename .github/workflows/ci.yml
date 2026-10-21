@@ -45,7 +45,7 @@ jobs:
       # distribution, so the pack is installed into the framework
       # environment as well.
       - name: Install the pack
-        run: uv pip install --python .venv -e .
+        run: uv pip install --python .venv -e ..
         working-directory: lisa
 
       # ruff and mypy resolve their configuration from the working
@@ -60,8 +60,13 @@ jobs:
         run: uv run ruff check "../lisa_packs/okf"
         working-directory: lisa
 
+      # mypy is run against the pack root so the pack's own namespace
+      # package resolves. The exclude drops the build/ tree that a local
+      # "pip install -e ." leaves behind: it is gitignored, so it is absent
+      # in CI, but when present it duplicates the "lisa_packs" module and
+      # makes mypy stop before it checks anything.
       - name: Type check (mypy)
-        run: uv run mypy "../lisa_packs/okf"
+        run: uv run mypy --exclude '(^|/)build/' "../lisa_packs/okf"
         working-directory: lisa
 
       # pytest runs from the pack root: the pack's own pyproject.toml sets
